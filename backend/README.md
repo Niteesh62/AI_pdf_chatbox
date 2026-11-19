@@ -60,9 +60,14 @@ Create `backend/.env`:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
+CORS_ALLOWED_ORIGINS=http://localhost:5173
 ```
 
 Do not commit this file.
+
+Set `CORS_ALLOWED_ORIGINS` to a comma-separated list when allowing additional
+frontend origins. If it is unset, the development origin
+`http://localhost:5173` is used.
 
 Create the MySQL database:
 
@@ -92,6 +97,8 @@ The API is available at `http://127.0.0.1:8000/api/`.
 
 | Method | Endpoint | Description |
 |---|---|---|
+| `GET` | `/api/health/` | Check whether the API server is responding |
+| `GET` | `/api/ready/` | Check whether the API and database are ready |
 | `GET` | `/api/pdfs/` | List uploaded PDFs |
 | `POST` | `/api/pdfs/` | Upload a PDF and build embeddings |
 | `GET` | `/api/pdfs/{id}/` | Retrieve one PDF |

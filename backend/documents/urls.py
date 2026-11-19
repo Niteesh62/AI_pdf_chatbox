@@ -5,6 +5,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PDFDocumentViewSet,
     PDFChatView,
+    HealthCheckView,
+    ReadinessCheckView,
 )
 
 # Create router
@@ -19,6 +21,9 @@ router.register(
 
 # API URL patterns
 urlpatterns = [
+    path("health/", HealthCheckView.as_view(), name="health"),
+    path("ready/", ReadinessCheckView.as_view(), name="readiness"),
+
     # PDF upload, list, retrieve, update and delete
     path("", include(router.urls)),
 

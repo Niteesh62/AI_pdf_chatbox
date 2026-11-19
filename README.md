@@ -95,6 +95,8 @@ Open `http://localhost:5173/`.
 
 | Method | Endpoint | Description |
 |---|---|---|
+| `GET` | `/api/health/` | Check whether the API server is responding |
+| `GET` | `/api/ready/` | Check whether the API and database are ready |
 | `GET` | `/api/pdfs/` | List uploaded PDFs |
 | `POST` | `/api/pdfs/` | Upload a PDF and create embeddings |
 | `GET` | `/api/pdfs/{id}/` | Get one PDF record |

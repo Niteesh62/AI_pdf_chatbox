@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 
+from django.db import DatabaseError, connection
 from django.http import FileResponse
 
 from .models import PDFDocument
@@ -20,6 +21,44 @@ from .services.pdf_chat_service import ask_pdf_question
 
 
 logger = logging.getLogger(__name__)
+
+
+class HealthCheckView(APIView):
+
+    def get(self, request):
+        return Response(
+            {"status": "ok"},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ReadinessCheckView(APIView):
+
+    def get(self, request):
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+        except DatabaseError as error:
+            logger.exception(
+                "Database readiness check failed | alias=%s | reason=%s",
+                connection.alias,
+                error,
+            )
+            return Response(
+                {
+                    "status": "not_ready",
+                    "checks": {"database": "unavailable"},
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "status": "ready",
+                "checks": {"database": "ok"},
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 # ==================================================

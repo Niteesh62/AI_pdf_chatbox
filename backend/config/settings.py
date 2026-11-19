@@ -31,7 +31,12 @@ ALLOWED_HOSTS = [
 ]
 
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173",
+    ).split(",")
+    if origin.strip()
 ]
 
 
@@ -150,13 +155,6 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 # DEFAULT PRIMARY KEY
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
-
-# CORS - REACT FRONTEND
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-]
 
 
 # AI - GROQ API
