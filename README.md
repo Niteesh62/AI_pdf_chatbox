@@ -65,6 +65,7 @@ pip install pypdf chromadb sentence-transformers
 Create `backend/.env`:
 
 ```env
+SECRET_KEY=generate_a_unique_secret_key
 GROQ_API_KEY=your_groq_api_key
 CLOUDINARY_CLOUD_NAME=your_cloud_name
 CLOUDINARY_API_KEY=your_api_key
@@ -73,6 +74,9 @@ CLOUDINARY_API_SECRET=your_api_secret
 
 PDF files are stored in Cloudinary. Set these values from your Cloudinary
 account; existing files in `backend/media/` are not migrated automatically.
+Generate a secure `SECRET_KEY` locally with
+`python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
+and set it in the backend environment (or Render's environment variables).
 
 Create the database in MySQL, update `backend/config/settings.py` with local database credentials, and run migrations:
 

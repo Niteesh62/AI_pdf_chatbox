@@ -23,6 +23,7 @@ load_dotenv(BASE_DIR / ".env")
 
 REQUIRED_ENVIRONMENT_VARIABLES = (
     "DATABASE_URL",
+    "SECRET_KEY",
     "GROQ_API_KEY",
     "CLOUDINARY_CLOUD_NAME",
     "CLOUDINARY_API_KEY",
@@ -42,7 +43,10 @@ SECRET_KEY = os.getenv(
     "django-insecure-development-only-change-this"
 )
 
-if not DEBUG and SECRET_KEY == "django-insecure-development-only-change-this":
+if not DEBUG and (
+    not SECRET_KEY
+    or SECRET_KEY == "django-insecure-development-only-change-this"
+):
     raise ValueError("Set a secure SECRET_KEY in Render Environment Variables.")
 
 

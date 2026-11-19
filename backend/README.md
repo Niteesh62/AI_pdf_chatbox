@@ -59,6 +59,7 @@ pip install -r requirements.txt
 Create `backend/.env`:
 
 ```env
+SECRET_KEY=generate_a_unique_secret_key
 GROQ_API_KEY=your_groq_api_key
 CORS_ALLOWED_ORIGINS=http://localhost:5173
 CLOUDINARY_CLOUD_NAME=your_cloud_name
@@ -68,14 +69,24 @@ CLOUDINARY_API_SECRET=your_api_secret
 
 Do not commit this file.
 
+Generate a secret key locally with:
+
+```powershell
+python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+```
+
+Set the generated value as `SECRET_KEY` in Render's environment variables.
+Never use the development fallback as a production secret.
+
 Create a Cloudinary account and set its cloud name, API key, and API secret
 above. PDF uploads use Cloudinary raw storage; Django reads them from Cloudinary
 when processing and downloading. Existing PDFs in local `media/` are not moved
 automatically.
 
-At startup, the backend reports whether `DATABASE_URL`, `GROQ_API_KEY`, and the
-three Cloudinary settings are configured, then checks the database and
-Cloudinary API connection. These logs never print credential values.
+At startup, the backend reports whether `DATABASE_URL`, `SECRET_KEY`,
+`GROQ_API_KEY`, and the three Cloudinary settings are configured, then checks
+the database and Cloudinary API connection. These logs never print credential
+values.
 
 Set `CORS_ALLOWED_ORIGINS` to a comma-separated list when allowing additional
 frontend origins. If it is unset, the development origin
