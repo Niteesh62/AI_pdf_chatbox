@@ -1,0 +1,60 @@
+# Python virtual environments and bytecode
+.venv/
+venv/
+backend/venv/
+backend/.venv/
+env/
+backend/media/pdfs
+media/pdfs
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.so
+
+# Django and Python tooling
+*.log
+*.pot
+*.pyc
+*.sqlite3
+media/
+staticfiles/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Backend generated data
+backend/vectorstore/
+
+# Node.js dependencies and frontend builds
+node_modules/
+frontend/node_modules/
+dist/
+build/
+coverage/
+.npm/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE and editor files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Package-manager and frontend caches/logs
+.cache/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

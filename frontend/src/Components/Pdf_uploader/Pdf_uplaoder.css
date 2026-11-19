@@ -1,0 +1,104 @@
+.upload-card {
+  width: 100%;
+  max-width: 500px;
+  margin: 60px auto;
+  padding: 45px 30px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  text-align: center;
+  box-shadow: 0 5px 25px rgba(0, 0, 0, 0.04);
+}
+
+.upload-icon {
+  width: 70px;
+  height: 70px;
+  margin: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #eff6ff;
+  color: #2563eb;
+  border-radius: 18px;
+}
+
+.upload-card h2 {
+  margin-top: 20px;
+  font-size: 23px;
+  color: #111827;
+}
+
+.upload-card > p {
+  margin-top: 10px;
+  color: #6b7280;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.file-select-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 25px;
+  padding: 12px 20px;
+  background: #eff6ff;
+  color: #2563eb;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.selected-file {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+  color: #374151;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.selected-file svg {
+  color: #2563eb;
+  flex-shrink: 0;
+}
+
+.upload-btn {
+  width: 100%;
+  margin-top: 25px;
+  padding: 14px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.upload-btn:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.upload-error {
+  color: #dc2626;
+  margin-top: 15px;
+  font-size: 13px;
+}
+
+.upload-card small {
+  display: block;
+  margin-top: 20px;
+  color: #9ca3af;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
