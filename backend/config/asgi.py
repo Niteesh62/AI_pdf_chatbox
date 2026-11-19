@@ -9,8 +9,13 @@ https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
 
 import os
 
-from django.core.asgi import get_asgi_application
-
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
+from django.core.asgi import get_asgi_application
+
+from documents.startup_checks import check_external_services
+
+
 application = get_asgi_application()
+
+check_external_services()

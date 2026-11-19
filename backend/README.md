@@ -61,9 +61,21 @@ Create `backend/.env`:
 ```env
 GROQ_API_KEY=your_groq_api_key
 CORS_ALLOWED_ORIGINS=http://localhost:5173
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
 ```
 
 Do not commit this file.
+
+Create a Cloudinary account and set its cloud name, API key, and API secret
+above. PDF uploads use Cloudinary raw storage; Django reads them from Cloudinary
+when processing and downloading. Existing PDFs in local `media/` are not moved
+automatically.
+
+At startup, the backend reports whether `DATABASE_URL`, `GROQ_API_KEY`, and the
+three Cloudinary settings are configured, then checks the database and
+Cloudinary API connection. These logs never print credential values.
 
 Set `CORS_ALLOWED_ORIGINS` to a comma-separated list when allowing additional
 frontend origins. If it is unset, the development origin
@@ -129,7 +141,9 @@ curl -X POST "http://127.0.0.1:8000/api/chat/" `
 ## Processing Behavior
 
 - The maximum request payload is 10 MB.
-- Uploaded PDFs are stored under `media/pdfs/` using Django's file storage.
+- Uploaded PDFs are stored in Cloudinary under `pdfs/`.
+- PDF text extraction temporarily downloads a copy for processing; the stored
+  original remains in Cloudinary.
 - PDF text is split into chunks of 1,000 characters with 200-character overlap.
 - ChromaDB data is stored under `backend/vectorstore/`.
 - Retrieval searches the five most relevant chunks filtered by `document_id`.
@@ -161,6 +175,7 @@ python manage.py check
 - Replace the Django secret key and enable environment-based configuration.
 - Set `DEBUG = False` and restrict `ALLOWED_HOSTS`.
 - Restrict CORS and configure HTTPS and upload storage.
-- Keep database credentials and the Groq key outside source control.
+- Keep database credentials, Cloudinary credentials, and the Groq key outside
+  source control.
 - Use persistent storage for MySQL, uploaded PDFs, and ChromaDB.
 - Add authentication and authorization before exposing document APIs.

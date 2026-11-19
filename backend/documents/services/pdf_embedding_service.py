@@ -1,6 +1,11 @@
 
 import os
+import shutil
+import tempfile
 import uuid
+import re
+import traceback
+import logging
 
 from django.conf import settings
 
@@ -10,9 +15,11 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
 
-# --------------------------------------------------
-# 1. CHROMADB STORAGE PATH
-# --------------------------------------------------
+# ==================================================
+# 1. LOGGING CONFIGURATION
+# ==================================================
+
+logger = logging.getLogger(__name__)
 
 VECTOR_DB_PATH = os.path.join(
     settings.BASE_DIR,
@@ -21,267 +28,451 @@ VECTOR_DB_PATH = os.path.join(
 
 COLLECTION_NAME = "pdf_documents_groq"
 
+print("\n" + "=" * 60)
+print("PDF INGESTION SERVICE LOADED")
+print("=" * 60)
 
-print("\n========== PDF INGESTION SERVICE LOADED ==========")
-print("Vector DB Path:", VECTOR_DB_PATH)
-print("Collection Name:", COLLECTION_NAME)
+print("[CONFIG] BASE_DIR:", settings.BASE_DIR)
+print("[CONFIG] Vector DB Path:", VECTOR_DB_PATH)
+print("[CONFIG] Collection:", COLLECTION_NAME)
+print("[CONFIG] Vector DB exists:", os.path.exists(VECTOR_DB_PATH))
 
 
-# --------------------------------------------------
-# 2. HUGGING FACE EMBEDDING MODEL
-# --------------------------------------------------
+# ==================================================
+# 2. CLEAN PDF TEXT
+# ==================================================
+
+def clean_pdf_text(text):
+
+    if not text:
+        return ""
+
+    original_length = len(text)
+
+    # Remove PostgreSQL-incompatible NULL characters
+    text = text.replace("\x00", "")
+
+    # Remove unwanted control characters
+    text = re.sub(
+        r"[\x01-\x08\x0B\x0C\x0E-\x1F]",
+        "",
+        text
+    )
+
+    cleaned_length = len(text)
+
+    removed = original_length - cleaned_length
+
+    if removed > 0:
+        print(
+            f"[CLEANING] Removed {removed} invalid characters"
+        )
+
+    print("[CLEANING] Original length:", original_length)
+    print("[CLEANING] Cleaned length:", cleaned_length)
+    print("[CLEANING] NULL character exists:", "\x00" in text)
+
+    return text.strip()
+
+
+# ==================================================
+# 3. HUGGING FACE EMBEDDING MODEL
+# ==================================================
 
 def get_embedding_model():
 
     print("\n[EMBEDDING] Loading Hugging Face model...")
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
-    )
+    try:
 
-    print("[EMBEDDING] Model loaded successfully.")
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
+        )
 
-    return embeddings
+        print("[EMBEDDING] Model loaded successfully")
+
+        # Test embedding generation
+        test_embedding = embeddings.embed_query(
+            "Testing PDF embedding model"
+        )
+
+        print("[EMBEDDING] Test successful")
+        print("[EMBEDDING] Vector dimensions:", len(test_embedding))
+
+        return embeddings
+
+    except Exception as e:
+
+        print("[EMBEDDING ERROR]", str(e))
+        traceback.print_exc()
+
+        raise
 
 
-# --------------------------------------------------
-# 3. CONNECT TO CHROMADB
-# --------------------------------------------------
+# ==================================================
+# 4. CONNECT TO CHROMADB
+# ==================================================
 
 def get_vector_store():
 
     print("\n[CHROMADB] Connecting to ChromaDB...")
 
-    embeddings = get_embedding_model()
+    try:
 
-    vector_store = Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-        persist_directory=VECTOR_DB_PATH
-    )
+        os.makedirs(
+            VECTOR_DB_PATH,
+            exist_ok=True
+        )
 
-    print("[CHROMADB] Connected successfully.")
+        print("[CHROMADB] Storage directory:", VECTOR_DB_PATH)
+        print("[CHROMADB] Directory writable:",
+              os.access(VECTOR_DB_PATH, os.W_OK))
 
-    print(
-        "[CHROMADB] Existing record count:",
-        vector_store._collection.count()
-    )
+        embeddings = get_embedding_model()
 
-    return vector_store
+        vector_store = Chroma(
+            collection_name=COLLECTION_NAME,
+            embedding_function=embeddings,
+            persist_directory=VECTOR_DB_PATH
+        )
+
+        print("[CHROMADB] Connected successfully")
+
+        count = vector_store._collection.count()
+
+        print("[CHROMADB] Existing records:", count)
+
+        return vector_store
+
+    except Exception as e:
+
+        print("[CHROMADB ERROR]", str(e))
+        traceback.print_exc()
+
+        raise
 
 
-# --------------------------------------------------
-# 4. PDF INGESTION PIPELINE
-# --------------------------------------------------
+# ==================================================
+# 5. MAIN PDF INGESTION PIPELINE
+# ==================================================
 
 def create_pdf_embeddings(pdf_document):
 
-    print("\n==========================================")
-    print("         PDF INGESTION STARTED")
-    print("==========================================")
+    print("\n" + "=" * 60)
+    print("PDF INGESTION STARTED")
+    print("=" * 60)
 
-    print("[PDF] Document ID:", pdf_document.id)
-    print("[PDF] Document Title:", pdf_document.title)
+    print("[DOCUMENT] ID:", pdf_document.id)
+    print("[DOCUMENT] Title:", pdf_document.title)
+    print("[DOCUMENT] File:", pdf_document.pdf_file.name)
 
-    # ----------------------------------------------
-    # STEP 1: GET PDF FILE PATH
-    # ----------------------------------------------
+    try:
 
-    pdf_path = pdf_document.pdf_file.path
+        # ------------------------------------------
+        # STEP 1: COPY PDF TO TEMPORARY FILE
+        # ------------------------------------------
 
-    print("\n[PDF] File Path:", pdf_path)
+        print("\n[STEP 1] Reading uploaded PDF...")
 
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(
-            f"PDF file does not exist: {pdf_path}"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+
+            pdf_path = os.path.join(
+                temporary_directory,
+                "document.pdf"
+            )
+
+            with pdf_document.pdf_file.open("rb") as stored_file:
+
+                with open(pdf_path, "wb") as temporary_file:
+
+                    shutil.copyfileobj(
+                        stored_file,
+                        temporary_file
+                    )
+
+            print("[PDF] Temporary path:", pdf_path)
+            print("[PDF] File exists:", os.path.exists(pdf_path))
+
+            file_size = os.path.getsize(pdf_path)
+
+            print("[PDF] File size:", file_size, "bytes")
+
+            if file_size == 0:
+                raise ValueError("Uploaded PDF is empty.")
+
+            if file_size < 5:
+                raise ValueError("Invalid PDF file.")
+
+            with open(pdf_path, "rb") as check_file:
+                file_header = check_file.read(5)
+
+            print("[PDF] File header:", file_header)
+
+            if file_header != b"%PDF-":
+                raise ValueError(
+                    "Uploaded file does not have a valid PDF header."
+                )
+
+            # --------------------------------------
+            # STEP 2: LOAD PDF
+            # --------------------------------------
+
+            print("\n[STEP 2] Loading PDF with PyPDFLoader...")
+
+            loader = PyPDFLoader(pdf_path)
+
+            pages = loader.load()
+
+            print("[LOADER] Total pages:", len(pages))
+
+            if not pages:
+                raise ValueError("No pages found in PDF.")
+
+            for index, page in enumerate(pages):
+
+                print(
+                    f"[PAGE {index + 1}] "
+                    f"Characters: {len(page.page_content)}"
+                )
+
+                print(
+                    f"[PAGE {index + 1}] "
+                    f"Metadata: {page.metadata}"
+                )
+
+        # ------------------------------------------
+        # STEP 3: CLEAN EXTRACTED TEXT
+        # ------------------------------------------
+
+        print("\n[STEP 3] Extracting and cleaning PDF text...")
+
+        for index, page in enumerate(pages):
+
+            original_text = page.page_content
+
+            print(
+                f"[TEXT] Page {index + 1} original length:",
+                len(original_text)
+            )
+
+            page.page_content = clean_pdf_text(
+                original_text
+            )
+
+            print(
+                f"[TEXT] Page {index + 1} cleaned length:",
+                len(page.page_content)
+            )
+
+        extracted_text = "\n\n".join(
+            page.page_content for page in pages
         )
 
-    print("[PDF] File exists successfully.")
+        print("[TEXT] Total characters:", len(extracted_text))
+        print("[TEXT] Empty:", not extracted_text.strip())
+        print("[TEXT] Contains NULL:", "\x00" in extracted_text)
 
-    # ----------------------------------------------
-    # STEP 2: LOAD PDF
-    # ----------------------------------------------
+        print("[TEXT] Preview:")
+        print(extracted_text[:300])
 
-    print("\n[LOADER] Loading PDF...")
+        if not extracted_text.strip():
 
-    loader = PyPDFLoader(pdf_path)
+            raise ValueError(
+                "No extractable text found. "
+                "This PDF may require OCR."
+            )
 
-    pages = loader.load()
+        # ------------------------------------------
+        # STEP 4: SAVE CLEAN TEXT TO DATABASE
+        # ------------------------------------------
 
-    print("[LOADER] Total pages:", len(pages))
+        print("\n[STEP 4] Saving extracted text to database...")
 
-    if not pages:
-        raise ValueError("No readable text found in this PDF.")
+        # Clean once more before database save
+        extracted_text = clean_pdf_text(extracted_text)
 
-    # ----------------------------------------------
-    # STEP 3: EXTRACT TEXT
-    # ----------------------------------------------
+        pdf_document.extracted_text = extracted_text
 
-    print("\n[TEXT] Extracting PDF text...")
-
-    extracted_text = "\n\n".join(
-        page.page_content for page in pages
-    )
-
-    print("[TEXT] Total extracted characters:", len(extracted_text))
-
-    print("\n[TEXT] First 300 characters:")
-    print(extracted_text[:300])
-
-    if not extracted_text.strip():
-        raise ValueError(
-            "PDF contains no extractable text. "
-            "It may be a scanned PDF requiring OCR."
+        pdf_document.save(
+            update_fields=["extracted_text"]
         )
 
-    # Save extracted text in Django database
-    pdf_document.extracted_text = extracted_text
+        print("[DATABASE] Extracted text saved successfully")
 
-    pdf_document.save(
-        update_fields=["extracted_text"]
-    )
+        # ------------------------------------------
+        # STEP 5: SPLIT INTO CHUNKS
+        # ------------------------------------------
 
-    print("[MYSQL] Extracted text saved successfully.")
+        print("\n[STEP 5] Splitting PDF into chunks...")
 
-    # ----------------------------------------------
-    # STEP 4: SPLIT TEXT INTO CHUNKS
-    # ----------------------------------------------
-
-    print("\n[SPLITTER] Splitting PDF text into chunks...")
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-
-    chunks = splitter.split_documents(pages)
-
-    print("[SPLITTER] Total chunks created:", len(chunks))
-
-    if not chunks:
-        raise ValueError("Could not create PDF text chunks.")
-
-    print("\n[SPLITTER] First chunk preview:")
-    print(chunks[0].page_content[:300])
-
-    # ----------------------------------------------
-    # STEP 5: ADD METADATA
-    # ----------------------------------------------
-
-    print("\n[METADATA] Adding document metadata...")
-
-    for index, chunk in enumerate(chunks):
-
-        chunk.metadata["document_id"] = int(pdf_document.id)
-
-        chunk.metadata["document_title"] = str(
-            pdf_document.title
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
         )
 
-        chunk.metadata["chunk_index"] = index
+        chunks = splitter.split_documents(pages)
 
-    print("[METADATA] Metadata added successfully.")
+        print("[SPLITTER] Total chunks:", len(chunks))
 
-    print("[METADATA] First chunk metadata:")
-    print(chunks[0].metadata)
+        if not chunks:
+            raise ValueError("No chunks created.")
 
-    # ----------------------------------------------
-    # STEP 6: CONNECT TO CHROMADB
-    # ----------------------------------------------
+        for index, chunk in enumerate(chunks):
 
-    vector_store = get_vector_store()
+            # Final cleaning before vector storage
+            chunk.page_content = clean_pdf_text(
+                chunk.page_content
+            )
 
-    # ----------------------------------------------
-    # STEP 7: REMOVE OLD DOCUMENT CHUNKS
-    # ----------------------------------------------
+            if not chunk.page_content.strip():
+                print(
+                    f"[WARNING] Empty chunk detected: {index}"
+                )
 
-    print("\n[CHROMADB] Removing previous document chunks...")
+        # Remove empty chunks
+        chunks = [
+            chunk for chunk in chunks
+            if chunk.page_content.strip()
+        ]
 
-    vector_store.delete(
-        where={
-            "document_id": int(pdf_document.id)
+        print("[SPLITTER] Valid chunks:", len(chunks))
+
+        if not chunks:
+            raise ValueError("All extracted chunks are empty.")
+
+        print("[CHUNK] First chunk preview:")
+        print(chunks[0].page_content[:300])
+
+        # ------------------------------------------
+        # STEP 6: ADD METADATA
+        # ------------------------------------------
+
+        print("\n[STEP 6] Adding metadata...")
+
+        for index, chunk in enumerate(chunks):
+
+            chunk.metadata["document_id"] = int(
+                pdf_document.id
+            )
+
+            chunk.metadata["document_title"] = str(
+                pdf_document.title
+            )
+
+            chunk.metadata["chunk_index"] = index
+
+        print("[METADATA] Metadata added successfully")
+        print("[METADATA] Sample:", chunks[0].metadata)
+
+        # ------------------------------------------
+        # STEP 7: CONNECT VECTOR STORE
+        # ------------------------------------------
+
+        print("\n[STEP 7] Connecting ChromaDB...")
+
+        vector_store = get_vector_store()
+
+        # ------------------------------------------
+        # STEP 8: DELETE OLD DOCUMENT CHUNKS
+        # ------------------------------------------
+
+        print("\n[STEP 8] Removing old document chunks...")
+
+        vector_store.delete(
+            where={
+                "document_id": int(pdf_document.id)
+            }
+        )
+
+        print("[CHROMADB] Old chunks deleted")
+
+        # ------------------------------------------
+        # STEP 9: GENERATE EMBEDDINGS
+        # ------------------------------------------
+
+        print("\n[STEP 9] Generating and storing embeddings...")
+
+        chunk_ids = [
+            str(uuid.uuid4())
+            for _ in chunks
+        ]
+
+        print("[EMBEDDING] Chunks to process:", len(chunks))
+        print("[EMBEDDING] Starting vector storage...")
+
+        vector_store.add_documents(
+            documents=chunks,
+            ids=chunk_ids
+        )
+
+        print("[EMBEDDING] Storage completed successfully")
+
+        # ------------------------------------------
+        # STEP 10: VERIFY STORAGE
+        # ------------------------------------------
+
+        print("\n[STEP 10] Verifying ChromaDB records...")
+
+        stored_data = vector_store.get(
+            where={
+                "document_id": int(pdf_document.id)
+            },
+            include=["documents", "metadatas"]
+        )
+
+        stored_count = len(stored_data["ids"])
+
+        print("[VERIFY] Expected:", len(chunks))
+        print("[VERIFY] Stored:", stored_count)
+
+        if stored_count != len(chunks):
+
+            raise ValueError(
+                f"Storage verification failed. "
+                f"Expected {len(chunks)}, got {stored_count}"
+            )
+
+        print("[VERIFY] Vector storage verified")
+
+        # ------------------------------------------
+        # STEP 11: FINAL RESULT
+        # ------------------------------------------
+
+        result = {
+            "document_id": pdf_document.id,
+            "total_pages": len(pages),
+            "total_characters": len(extracted_text),
+            "total_chunks": len(chunks),
+            "stored_chunks": stored_count,
+            "collection_name": COLLECTION_NAME,
+            "status": "success",
+            "message": "PDF embeddings created and verified successfully"
         }
-    )
 
-    print("[CHROMADB] Previous chunks removed.")
+        print("\n" + "=" * 60)
+        print("PDF INGESTION COMPLETED SUCCESSFULLY")
+        print("=" * 60)
 
-    # ----------------------------------------------
-    # STEP 8: GENERATE AND STORE EMBEDDINGS
-    # ----------------------------------------------
+        print("[RESULT]", result)
 
-    print("\n[EMBEDDING] Generating embeddings and storing chunks...")
+        return result
 
-    chunk_ids = [
-        str(uuid.uuid4())
-        for _ in chunks
-    ]
+    except Exception as e:
 
-    vector_store.add_documents(
-        documents=chunks,
-        ids=chunk_ids
-    )
+        print("\n" + "=" * 60)
+        print("PDF INGESTION FAILED")
+        print("=" * 60)
 
-    print("[EMBEDDING] Embeddings stored successfully.")
+        print("[ERROR TYPE]", type(e).__name__)
+        print("[ERROR MESSAGE]", str(e))
 
-    # ----------------------------------------------
-    # STEP 9: VERIFY CHROMADB STORAGE
-    # ----------------------------------------------
+        traceback.print_exc()
 
-    print("\n[VERIFY] Checking stored records...")
-
-    stored_data = vector_store.get(
-        where={
-            "document_id": int(pdf_document.id)
-        },
-        include=["documents", "metadatas"]
-    )
-
-    stored_count = len(stored_data["ids"])
-
-    print("[VERIFY] Expected chunks:", len(chunks))
-    print("[VERIFY] Stored chunks:", stored_count)
-
-    if stored_count != len(chunks):
-        raise ValueError(
-            "Embedding storage verification failed."
+        logger.exception(
+            "PDF ingestion failed for document ID %s",
+            pdf_document.id
         )
 
-    print("\n[VERIFY] First stored record:")
-
-    if stored_count > 0:
-
-        print("ID:", stored_data["ids"][0])
-
-        print(
-            "Text:",
-            stored_data["documents"][0][:300]
-        )
-
-        print(
-            "Metadata:",
-            stored_data["metadatas"][0]
-        )
-
-    # ----------------------------------------------
-    # STEP 10: FINAL RESULT
-    # ----------------------------------------------
-
-    result = {
-        "document_id": pdf_document.id,
-        "total_pages": len(pages),
-        "total_characters": len(extracted_text),
-        "total_chunks": len(chunks),
-        "stored_chunks": stored_count,
-        "collection_name": COLLECTION_NAME,
-        "message": "PDF embeddings created and verified successfully"
-    }
-
-    print("\n==========================================")
-    print("       PDF INGESTION COMPLETED")
-    print("==========================================")
-
-    print(result)
-
-    return result
+        raise

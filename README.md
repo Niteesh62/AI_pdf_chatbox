@@ -57,7 +57,7 @@ Run the backend and frontend in separate terminals.
 cd backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install django djangorestframework django-cors-headers mysqlclient python-dotenv
+pip install django djangorestframework django-cors-headers django-cloudinary-storage mysqlclient python-dotenv
 pip install langchain langchain-community langchain-core langchain-huggingface langchain-chroma langchain-groq
 pip install pypdf chromadb sentence-transformers
 ```
@@ -66,7 +66,13 @@ Create `backend/.env`:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
 ```
+
+PDF files are stored in Cloudinary. Set these values from your Cloudinary
+account; existing files in `backend/media/` are not migrated automatically.
 
 Create the database in MySQL, update `backend/config/settings.py` with local database credentials, and run migrations:
 
