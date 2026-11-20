@@ -48,16 +48,18 @@ npm run dev
 
 Open `http://localhost:5173/`.
 
-The API base URL defaults to the local backend and can be overridden with the
-Vite environment variable `VITE_API_BASE_URL`:
+The API base URL defaults to the local backend. Set `API_BASE_URL` in the
+frontend environment (including Vercel project settings) to override it:
 
 ```env
-VITE_API_BASE_URL=http://127.0.0.1:8000/api/
+API_BASE_URL=https://your-backend.example.com/api/
 ```
 
-Set it to the deployed backend URL for production builds. The backend must
-allow the frontend's exact origin in `CORS_ALLOWED_ORIGINS`; an HTTPS frontend
-must use an HTTPS API.
+Vite explicitly exposes only this variable to the browser. The standard
+`VITE_API_BASE_URL` variable is also supported as a fallback. Redeploy after
+changing Vercel environment variables so the new URL is included in the build.
+The backend must allow the frontend's exact origin in `CORS_ALLOWED_ORIGINS`;
+an HTTPS frontend must use an HTTPS API.
 
 ## Available Scripts
 

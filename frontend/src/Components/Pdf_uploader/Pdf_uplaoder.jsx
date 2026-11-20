@@ -110,7 +110,7 @@ const Pdf_uploader = ({ onUpload }) => {
         );
       } else if (err.request) {
         setError(
-          `No response from the API at ${API.defaults.baseURL}. Check that the backend is running, VITE_API_BASE_URL is correct, and this frontend origin (${window.location.origin}) is allowed by CORS. HTTPS frontends also require an HTTPS API. Browser error: ${err.message}`
+          `No response from the API at ${API.defaults.baseURL}. Check that the backend is running, API_BASE_URL is correct, and this frontend origin (${window.location.origin}) is allowed by CORS. HTTPS frontends also require an HTTPS API. Browser error: ${err.message}`
         );
       } else {
         setError(err.message || "PDF upload failed. Please try again.");
