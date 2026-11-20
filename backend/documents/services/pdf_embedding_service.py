@@ -1,597 +1,565 @@
+"""PDF text extraction and pgvector ingestion for Django + Supabase PostgreSQL.
 
+This implementation uses the existing table layout:
+    id, document_id, content, metadata (jsonb), embedding (vector(384))
+
+It intentionally uses Django's configured PostgreSQL connection instead of
+LangChain PGVectorStore, so it does not expect a different set of columns.
+"""
+
+import json
+import logging
 import os
+import re
 import shutil
 import tempfile
-import uuid
-import re
-import traceback
-import logging
 import threading
+import time
+from typing import Any
 
 from django.conf import settings
-from django.db import connection
-
+from django.db import connection, transaction
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_postgres import PGEngine, PGVectorStore
-from sqlalchemy.engine import URL
-
-
-# ==================================================
-# 1. LOGGING CONFIGURATION
-# ==================================================
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
 VECTOR_SCHEMA_NAME = "public"
 VECTOR_TABLE_NAME = "pdf_document_embeddings"
-VECTOR_METADATA_COLUMNS = [
-    "document_id",
-    "document_title",
-    "chunk_index",
-]
-_vector_store = None
-_vector_store_lock = threading.Lock()
+EMBEDDING_MODEL_NAME = os.getenv(
+    "HF_EMBEDDING_MODEL",
+    "sentence-transformers/all-MiniLM-L6-v2",
+)
+EXPECTED_VECTOR_SIZE = 384
+EMBEDDING_BATCH_SIZE = 64
+
+_embedding_model = None
+_embedding_dimension = None
+_embedding_lock = threading.Lock()
 
 
 class PDFIngestionError(Exception):
+    """An ingestion failure annotated with the pipeline stage."""
 
-    def __init__(self, stage, cause):
+    def __init__(self, stage: str, cause: Exception):
         self.stage = stage
         self.cause = cause
-        super().__init__(str(cause))
+        super().__init__(f"PDF ingestion failed at stage '{stage}': {cause}")
 
 
-print("\n" + "=" * 60)
-print("PDF INGESTION SERVICE LOADED")
-print("=" * 60)
-
-print("[CONFIG] BASE_DIR:", settings.BASE_DIR)
-print("[CONFIG] Vector store: Supabase PostgreSQL pgvector")
-print("[CONFIG] Vector table:", f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}")
+def _log_stage(stage: str, message: str, *, document_id: Any = None, **extra):
+    details = {"stage": stage, **extra}
+    if document_id is not None:
+        details["document_id"] = document_id
+    logger.info("%s | %s", message, " | ".join(f"{k}={v}" for k, v in details.items()))
 
 
-# ==================================================
-# 2. CLEAN PDF TEXT
-# ==================================================
-
-def clean_pdf_text(text):
-
+def clean_pdf_text(text: str) -> str:
+    """Remove NULL and disallowed control characters before DB storage."""
     if not text:
         return ""
 
     original_length = len(text)
-
-    # Remove PostgreSQL-incompatible NULL characters
     text = text.replace("\x00", "")
+    text = re.sub(r"[\x01-\x08\x0B\x0C\x0E-\x1F]", "", text)
+    cleaned = text.strip()
+    removed = original_length - len(cleaned)
 
-    # Remove unwanted control characters
-    text = re.sub(
-        r"[\x01-\x08\x0B\x0C\x0E-\x1F]",
-        "",
-        text
-    )
-
-    cleaned_length = len(text)
-
-    removed = original_length - cleaned_length
-
-    if removed > 0:
-        print(
-            f"[CLEANING] Removed {removed} invalid characters"
+    if removed:
+        logger.debug(
+            "PDF text cleaned | original_chars=%s | cleaned_chars=%s | removed_or_trimmed=%s",
+            original_length,
+            len(cleaned),
+            removed,
         )
+    return cleaned
 
-    print("[CLEANING] Original length:", original_length)
-    print("[CLEANING] Cleaned length:", cleaned_length)
-    print("[CLEANING] NULL character exists:", "\x00" in text)
-
-    return text.strip()
-
-
-# ==================================================
-# 3. HUGGING FACE EMBEDDING MODEL
-# ==================================================
 
 def get_embedding_model():
+    """Load the Hugging Face model once per worker process."""
+    global _embedding_model, _embedding_dimension
 
-    print("\n[EMBEDDING] Loading Hugging Face model...")
+    if _embedding_model is not None:
+        return _embedding_model, _embedding_dimension
 
-    try:
+    with _embedding_lock:
+        if _embedding_model is not None:
+            return _embedding_model, _embedding_dimension
 
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True}
-        )
-
-        print("[EMBEDDING] Model loaded successfully")
-
-        # Test embedding generation
-        test_embedding = embeddings.embed_query(
-            "Testing PDF embedding model"
-        )
-
-        print("[EMBEDDING] Test successful")
-        print("[EMBEDDING] Vector dimensions:", len(test_embedding))
-
-        return embeddings, len(test_embedding)
-
-    except Exception as e:
-
-        print("[EMBEDDING ERROR]", str(e))
-        traceback.print_exc()
-
-        raise
-
-
-# ==================================================
-# 4. CONNECT TO POSTGRESQL PGVECTOR
-# ==================================================
-
-def _ensure_vector_table(vector_size):
-
-    if connection.vendor != "postgresql":
-        raise RuntimeError(
-            "pgvector requires PostgreSQL. Configure DATABASE_URL "
-            "with a PostgreSQL connection string."
-        )
-
-    vector_size = int(vector_size)
-    if vector_size <= 0:
-        raise ValueError("The embedding model returned an invalid vector size.")
-
-    schema = connection.ops.quote_name(VECTOR_SCHEMA_NAME)
-    table = connection.ops.quote_name(VECTOR_TABLE_NAME)
-
-    with connection.cursor() as cursor:
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        cursor.execute(
-            """
-            SELECT namespace.nspname
-            FROM pg_extension AS extension
-            JOIN pg_namespace AS namespace
-              ON namespace.oid = extension.extnamespace
-            WHERE extension.extname = %s
-            """,
-            ["vector"],
-        )
-        extension_schema_row = cursor.fetchone()
-        if not extension_schema_row:
-            raise RuntimeError(
-                "The PostgreSQL vector extension is not available."
-            )
-
-        extension_schema = extension_schema_row[0]
-        vector_type = (
-            f"{connection.ops.quote_name(extension_schema)}."
-            f"{connection.ops.quote_name('vector')}({vector_size})"
-        )
-        cursor.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {schema}.{table} (
-                "langchain_id" UUID PRIMARY KEY,
-                "content" TEXT NOT NULL,
-                "embedding" {vector_type} NOT NULL,
-                "document_id" BIGINT NOT NULL,
-                "document_title" TEXT,
-                "chunk_index" BIGINT,
-                "langchain_metadata" JSON
-            )
-            """
-        )
-    return extension_schema
-
-
-def get_vector_store():
-
-    global _vector_store
-
-    if _vector_store is not None:
-        return _vector_store
-
-    with _vector_store_lock:
-        if _vector_store is not None:
-            return _vector_store
-
-        print("\n[PGVECTOR] Connecting to Supabase PostgreSQL...")
-
+        started = time.monotonic()
+        logger.info("Loading embedding model | model=%s | device=cpu", EMBEDDING_MODEL_NAME)
         try:
-            if connection.vendor != "postgresql":
-                raise RuntimeError(
-                    "pgvector requires PostgreSQL. Configure DATABASE_URL "
-                    "with a PostgreSQL connection string."
+            model = HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL_NAME,
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True},
+            )
+            probe = model.embed_query("PDF embedding model dimension check")
+            dimension = len(probe)
+
+            if dimension != EXPECTED_VECTOR_SIZE:
+                raise ValueError(
+                    f"Embedding model returned {dimension} dimensions; "
+                    f"the configured Supabase vector column expects {EXPECTED_VECTOR_SIZE}."
                 )
 
-            embeddings, vector_size = get_embedding_model()
-            extension_schema = _ensure_vector_table(vector_size)
-
-            params = connection.get_connection_params()
-            query = {}
-            if params.get("sslmode"):
-                query["sslmode"] = params["sslmode"]
-
-            database_url = URL.create(
-                "postgresql+psycopg",
-                username=params.get("user") or None,
-                password=params.get("password") or None,
-                host=params.get("host") or None,
-                port=int(params["port"]) if params.get("port") else None,
-                database=params.get("dbname") or None,
-                query=query,
+            _embedding_model = model
+            _embedding_dimension = dimension
+            logger.info(
+                "Embedding model loaded | model=%s | dimensions=%s | elapsed_seconds=%.2f",
+                EMBEDDING_MODEL_NAME,
+                dimension,
+                time.monotonic() - started,
             )
-            engine = PGEngine.from_connection_string(
-                database_url,
-                connect_args={
-                    "prepare_threshold": params.get("prepare_threshold"),
-                    "options": (
-                        f"-c search_path={VECTOR_SCHEMA_NAME},{extension_schema}"
-                    ),
-                },
-            )
-
-            _vector_store = PGVectorStore.create_sync(
-                engine=engine,
-                embedding_service=embeddings,
-                table_name=VECTOR_TABLE_NAME,
-                schema_name=VECTOR_SCHEMA_NAME,
-                content_column="content",
-                embedding_column="embedding",
-                metadata_columns=VECTOR_METADATA_COLUMNS,
-                id_column="langchain_id",
-                metadata_json_column="langchain_metadata",
-            )
-
-            print(
-                f"[PGVECTOR] Connected table="
-                f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}",
-                flush=True,
-            )
-            return _vector_store
-
-        except Exception as error:
-            print(
-                f"[PGVECTOR ERROR] {type(error).__name__}: {error}",
-                flush=True,
-            )
-            traceback.print_exc()
-            logger.exception("Could not initialize the PostgreSQL vector store")
+            return _embedding_model, _embedding_dimension
+        except Exception:
+            logger.exception("Embedding model initialization failed | model=%s", EMBEDDING_MODEL_NAME)
             raise
 
 
-def count_document_embeddings(document_id):
+def _quoted_table_name() -> str:
+    return (
+        f"{connection.ops.quote_name(VECTOR_SCHEMA_NAME)}."
+        f"{connection.ops.quote_name(VECTOR_TABLE_NAME)}"
+    )
+
+
+def ensure_vector_table(vector_size: int) -> str:
+    """Ensure the expected table exists and validate its schema/dimension.
+
+    Existing tables are never silently altered or dropped. An incompatible
+    schema raises a clear error so existing user data is not destroyed.
+    """
+    if connection.vendor != "postgresql":
+        raise RuntimeError(
+            "Supabase pgvector requires PostgreSQL. Check Django DATABASES settings."
+        )
+
+    if int(vector_size) != EXPECTED_VECTOR_SIZE:
+        raise ValueError(
+            f"Expected {EXPECTED_VECTOR_SIZE}-dimensional embeddings, got {vector_size}."
+        )
 
     schema = connection.ops.quote_name(VECTOR_SCHEMA_NAME)
     table = connection.ops.quote_name(VECTOR_TABLE_NAME)
-    document_id_column = connection.ops.quote_name("document_id")
 
     with connection.cursor() as cursor:
         cursor.execute(
-            f"SELECT COUNT(*) FROM {schema}.{table} "
-            f"WHERE {document_id_column} = %s",
-            [int(document_id)],
+            "SELECT namespace.nspname "
+            "FROM pg_extension AS ext "
+            "JOIN pg_namespace AS namespace ON namespace.oid = ext.extnamespace "
+            "WHERE ext.extname = %s",
+            ["vector"],
         )
-        result = cursor.fetchone()
+        extension_row = cursor.fetchone()
 
-    return int(result[0]) if result else 0
-
-
-# ==================================================
-# 5. MAIN PDF INGESTION PIPELINE
-# ==================================================
-
-def create_pdf_embeddings(pdf_document):
-
-    print("\n" + "=" * 60)
-    print("PDF INGESTION STARTED")
-    print("=" * 60)
-
-    print("[DOCUMENT] ID:", pdf_document.id)
-    print("[DOCUMENT] Title:", pdf_document.title)
-    print("[DOCUMENT] File:", pdf_document.pdf_file.name)
-
-    stage = "cloudinary_download"
-
-    try:
-
-        # ------------------------------------------
-        # STEP 1: COPY PDF TO TEMPORARY FILE
-        # ------------------------------------------
-
-        print("\n[STEP 1] Reading uploaded PDF...")
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-
-            pdf_path = os.path.join(
-                temporary_directory,
-                "document.pdf"
+        if not extension_row:
+            try:
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            except Exception as exc:
+                raise RuntimeError(
+                    "The pgvector extension is not enabled and the database user "
+                    "could not create it. Enable vector in Supabase Database > Extensions."
+                ) from exc
+            cursor.execute(
+                "SELECT namespace.nspname "
+                "FROM pg_extension AS ext "
+                "JOIN pg_namespace AS namespace ON namespace.oid = ext.extnamespace "
+                "WHERE ext.extname = %s",
+                ["vector"],
             )
+            extension_row = cursor.fetchone()
 
-            with pdf_document.pdf_file.open("rb") as stored_file:
+        if not extension_row:
+            raise RuntimeError("pgvector extension is unavailable after initialization.")
 
-                with open(pdf_path, "wb") as temporary_file:
-
-                    shutil.copyfileobj(
-                        stored_file,
-                        temporary_file
-                    )
-
-            print("[PDF] Temporary path:", pdf_path)
-            print("[PDF] File exists:", os.path.exists(pdf_path))
-
-            file_size = os.path.getsize(pdf_path)
-
-            print("[PDF] File size:", file_size, "bytes")
-
-            if file_size == 0:
-                raise ValueError("Uploaded PDF is empty.")
-
-            if file_size < 5:
-                raise ValueError("Invalid PDF file.")
-
-            with open(pdf_path, "rb") as check_file:
-                file_header = check_file.read(5)
-
-            print("[PDF] File header:", file_header)
-
-            if file_header != b"%PDF-":
-                raise ValueError(
-                    "Uploaded file does not have a valid PDF header."
-                )
-
-            # --------------------------------------
-            # STEP 2: LOAD PDF
-            # --------------------------------------
-
-            stage = "pdf_parse"
-            print("\n[STEP 2] Loading PDF with PyPDFLoader...")
-
-            loader = PyPDFLoader(pdf_path)
-
-            pages = loader.load()
-
-            print("[LOADER] Total pages:", len(pages))
-
-            if not pages:
-                raise ValueError("No pages found in PDF.")
-
-            for index, page in enumerate(pages):
-
-                print(
-                    f"[PAGE {index + 1}] "
-                    f"Characters: {len(page.page_content)}"
-                )
-
-                print(
-                    f"[PAGE {index + 1}] "
-                    f"Metadata: {page.metadata}"
-                )
-
-        # ------------------------------------------
-        # STEP 3: CLEAN EXTRACTED TEXT
-        # ------------------------------------------
-
-        stage = "text_extraction"
-        print("\n[STEP 3] Extracting and cleaning PDF text...")
-
-        for index, page in enumerate(pages):
-
-            original_text = page.page_content
-
-            print(
-                f"[TEXT] Page {index + 1} original length:",
-                len(original_text)
-            )
-
-            page.page_content = clean_pdf_text(
-                original_text
-            )
-
-            print(
-                f"[TEXT] Page {index + 1} cleaned length:",
-                len(page.page_content)
-            )
-
-        extracted_text = "\n\n".join(
-            page.page_content for page in pages
+        extension_schema = extension_row[0]
+        vector_type = (
+            f"{connection.ops.quote_name(extension_schema)}."
+            f"{connection.ops.quote_name('vector')}({EXPECTED_VECTOR_SIZE})"
         )
 
-        print("[TEXT] Total characters:", len(extracted_text))
-        print("[TEXT] Empty:", not extracted_text.strip())
-        print("[TEXT] Contains NULL:", "\x00" in extracted_text)
+        cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.{table} (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                document_id BIGINT NOT NULL,
+                content TEXT NOT NULL,
+                metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                embedding {vector_type} NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
 
-        if not extracted_text.strip():
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s",
+            [VECTOR_SCHEMA_NAME, VECTOR_TABLE_NAME],
+        )
+        actual_columns = {row[0] for row in cursor.fetchall()}
 
+        required_columns = {"id", "document_id", "content", "metadata", "embedding"}
+        missing = required_columns - actual_columns
+        if missing:
+            raise RuntimeError(
+                f"Table {VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME} has an incompatible schema. "
+                f"Missing columns: {sorted(missing)}. Existing columns: {sorted(actual_columns)}. "
+                "Back up existing data before applying a schema migration."
+            )
+
+        cursor.execute(
+            "SELECT format_type(a.atttypid, a.atttypmod) "
+            "FROM pg_attribute a "
+            "JOIN pg_class c ON a.attrelid = c.oid "
+            "JOIN pg_namespace n ON c.relnamespace = n.oid "
+            "WHERE n.nspname = %s AND c.relname = %s AND a.attname = 'embedding' "
+            "AND a.attnum > 0 AND NOT a.attisdropped",
+            [VECTOR_SCHEMA_NAME, VECTOR_TABLE_NAME],
+        )
+        dimension_row = cursor.fetchone()
+        actual_vector_type = dimension_row[0] if dimension_row else None
+
+        if actual_vector_type != f"vector({EXPECTED_VECTOR_SIZE})":
+            raise RuntimeError(
+                f"The embedding column is {actual_vector_type!r}; expected "
+                f"vector({EXPECTED_VECTOR_SIZE}). Do not drop a table containing data. "
+                "Create a reviewed migration after backing up existing records."
+            )
+
+    logger.info(
+        "Supabase pgvector table verified | table=%s.%s | vector_type=vector(%s)",
+        VECTOR_SCHEMA_NAME,
+        VECTOR_TABLE_NAME,
+        vector_size,
+    )
+    return extension_schema
+
+
+def _vector_literal(values) -> str:
+    """Serialize numeric embedding values into pgvector's textual format."""
+    if not values:
+        raise ValueError("Embedding model returned an empty vector.")
+    return "[" + ",".join(format(float(value), ".9g") for value in values) + "]"
+
+
+def replace_document_embeddings(document_id: int, chunks, vectors) -> int:
+    """Atomically replace all chunks for one document in the existing table."""
+    if len(chunks) != len(vectors):
+        raise ValueError(
+            f"Chunk/vector count mismatch: {len(chunks)} chunks, {len(vectors)} vectors."
+        )
+
+    schema = connection.ops.quote_name(VECTOR_SCHEMA_NAME)
+    table = connection.ops.quote_name(VECTOR_TABLE_NAME)
+    extension_schema = ensure_vector_table(EXPECTED_VECTOR_SIZE)
+    vector_cast = (
+        f"{connection.ops.quote_name(extension_schema)}."
+        f"{connection.ops.quote_name('vector')}"
+    )
+
+    insert_sql = f"""
+        INSERT INTO {schema}.{table}
+            (document_id, content, metadata, embedding)
+        VALUES (%s, %s, %s::jsonb, %s::{vector_cast})
+    """
+
+    rows = []
+    for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        if len(vector) != EXPECTED_VECTOR_SIZE:
             raise ValueError(
-                "No extractable text found. "
-                "This PDF may require OCR."
+                f"Chunk {index} has {len(vector)} vector dimensions; "
+                f"expected {EXPECTED_VECTOR_SIZE}."
             )
 
-        # ------------------------------------------
-        # STEP 4: SAVE CLEAN TEXT TO DATABASE
-        # ------------------------------------------
-
-        stage = "database_update"
-        print("\n[STEP 4] Saving extracted text to database...")
-
-        # Clean once more before database save
-        extracted_text = clean_pdf_text(extracted_text)
-
-        pdf_document.extracted_text = extracted_text
-
-        pdf_document.save(
-            update_fields=["extracted_text"]
-        )
-
-        print("[DATABASE] Extracted text saved successfully")
-
-        # ------------------------------------------
-        # STEP 5: SPLIT INTO CHUNKS
-        # ------------------------------------------
-
-        stage = "chunking"
-        print("\n[STEP 5] Splitting PDF into chunks...")
-
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
-        )
-
-        chunks = splitter.split_documents(pages)
-
-        print("[SPLITTER] Total chunks:", len(chunks))
-
-        if not chunks:
-            raise ValueError("No chunks created.")
-
-        for index, chunk in enumerate(chunks):
-
-            # Final cleaning before vector storage
-            chunk.page_content = clean_pdf_text(
-                chunk.page_content
-            )
-
-            if not chunk.page_content.strip():
-                print(
-                    f"[WARNING] Empty chunk detected: {index}"
-                )
-
-        # Remove empty chunks
-        chunks = [
-            chunk for chunk in chunks
-            if chunk.page_content.strip()
-        ]
-
-        print("[SPLITTER] Valid chunks:", len(chunks))
-
-        if not chunks:
-            raise ValueError("All extracted chunks are empty.")
-
-        # ------------------------------------------
-        # STEP 6: ADD METADATA
-        # ------------------------------------------
-
-        print("\n[STEP 6] Adding metadata...")
-
-        for index, chunk in enumerate(chunks):
-
-            chunk.metadata["document_id"] = int(
-                pdf_document.id
-            )
-
-            chunk.metadata["document_title"] = str(
-                pdf_document.title
-            )
-
-            chunk.metadata["chunk_index"] = index
-
-        print("[METADATA] Metadata added successfully")
-        print("[METADATA] Sample:", chunks[0].metadata)
-
-        # ------------------------------------------
-        # STEP 7: CONNECT VECTOR STORE
-        # ------------------------------------------
-
-        stage = "vector_store_connect"
-        print("\n[STEP 7] Connecting to Supabase pgvector...")
-
-        vector_store = get_vector_store()
-
-        # ------------------------------------------
-        # STEP 8: DELETE OLD DOCUMENT CHUNKS
-        # ------------------------------------------
-
-        stage = "old_embedding_cleanup"
-        print("\n[STEP 8] Removing old document chunks...")
-
-        vector_store.delete(
-            filter={
-                "document_id": int(pdf_document.id)
+        metadata = dict(chunk.metadata or {})
+        metadata.update(
+            {
+                "document_id": int(document_id),
+                "chunk_index": index,
             }
         )
-
-        print("[PGVECTOR] Old chunks deleted")
-
-        # ------------------------------------------
-        # STEP 9: GENERATE EMBEDDINGS
-        # ------------------------------------------
-
-        stage = "embedding_generation_and_storage"
-        print("\n[STEP 9] Generating and storing embeddings...")
-
-        chunk_ids = [
-            str(uuid.uuid4())
-            for _ in chunks
-        ]
-
-        print("[EMBEDDING] Chunks to process:", len(chunks))
-        print("[EMBEDDING] Starting vector storage...")
-
-        vector_store.add_documents(
-            documents=chunks,
-            ids=chunk_ids
+        rows.append(
+            (
+                int(document_id),
+                chunk.page_content,
+                json.dumps(metadata, ensure_ascii=False, default=str),
+                _vector_literal(vector),
+            )
         )
 
-        print("[EMBEDDING] Storage completed successfully")
-
-        # ------------------------------------------
-        # STEP 10: VERIFY STORAGE
-        # ------------------------------------------
-
-        stage = "embedding_verification"
-        print("\n[STEP 10] Verifying pgvector records...")
-
-        stored_count = count_document_embeddings(pdf_document.id)
-
-        print("[VERIFY] Expected:", len(chunks))
-        print("[VERIFY] Stored:", stored_count)
-
-        if stored_count != len(chunks):
-
-            raise ValueError(
-                f"Storage verification failed. "
-                f"Expected {len(chunks)}, got {stored_count}"
+    # Delete and insert in one transaction: a failed insert restores old rows.
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM {schema}.{table} WHERE document_id = %s",
+                [int(document_id)],
+            )
+            deleted_count = cursor.rowcount
+            logger.info(
+                "Old PDF embeddings removed inside replacement transaction | "
+                "document_id=%s | deleted=%s",
+                document_id,
+                deleted_count,
             )
 
-        print("[VERIFY] Vector storage verified")
+            if rows:
+                cursor.executemany(insert_sql, rows)
 
-        # ------------------------------------------
-        # STEP 11: FINAL RESULT
-        # ------------------------------------------
+            cursor.execute(
+                f"SELECT COUNT(*), COUNT(embedding) FROM {schema}.{table} "
+                "WHERE document_id = %s",
+                [int(document_id)],
+            )
+            stored_count, non_null_count = cursor.fetchone()
 
-        result = {
-            "document_id": pdf_document.id,
-            "total_pages": len(pages),
-            "total_characters": len(extracted_text),
-            "total_chunks": len(chunks),
-            "stored_chunks": stored_count,
-            "vector_table": f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}",
-            "status": "success",
-            "message": "PDF embeddings created and verified successfully"
-        }
+            if stored_count != len(chunks) or non_null_count != len(chunks):
+                raise RuntimeError(
+                    "pgvector storage verification failed: "
+                    f"expected={len(chunks)}, stored={stored_count}, "
+                    f"non_null_embeddings={non_null_count}."
+                )
 
-        print("\n" + "=" * 60)
-        print("PDF INGESTION COMPLETED SUCCESSFULLY")
-        print("=" * 60)
+    logger.info(
+        "PDF embeddings committed and verified | document_id=%s | chunks=%s",
+        document_id,
+        stored_count,
+    )
+    return int(stored_count)
 
-        print("[RESULT]", result)
 
-        return result
+def count_document_embeddings(document_id: int) -> int:
+    table = _quoted_table_name()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE document_id = %s",
+            [int(document_id)],
+        )
+        row = cursor.fetchone()
+    return int(row[0]) if row else 0
 
-    except Exception as e:
 
-        print("\n" + "=" * 60)
-        print("PDF INGESTION FAILED")
-        print("=" * 60)
+def create_pdf_embeddings(pdf_document):
+    """Extract, split, embed, and store one uploaded PDF."""
+    document_id = getattr(pdf_document, "pk", None)
+    title = getattr(pdf_document, "title", "")
+    stage = "initialization"
+    started = time.monotonic()
 
-        print("[ERROR TYPE]", type(e).__name__)
-        print("[ERROR MESSAGE]", str(e))
+    logger.info(
+        "PDF ingestion started | document_id=%s | title=%s | table=%s.%s",
+        document_id,
+        title,
+        VECTOR_SCHEMA_NAME,
+        VECTOR_TABLE_NAME,
+    )
 
-        traceback.print_exc()
+    try:
+        if not document_id:
+            raise ValueError("PDFDocument must be saved before embedding ingestion.")
+        if not getattr(pdf_document, "pdf_file", None):
+            raise ValueError("PDFDocument does not contain an uploaded pdf_file.")
 
-        logger.exception(
-            "PDF ingestion failed for document ID %s",
-            pdf_document.id
+        # 1. Download/copy the stored PDF to a temporary local file.
+        stage = "cloudinary_download"
+        logger.info("PDF download started | document_id=%s", document_id)
+
+        with tempfile.TemporaryDirectory(prefix="pdf-ingestion-") as temp_dir:
+            pdf_path = os.path.join(temp_dir, "document.pdf")
+            with pdf_document.pdf_file.open("rb") as stored_file:
+                with open(pdf_path, "wb") as local_file:
+                    shutil.copyfileobj(stored_file, local_file)
+
+            file_size = os.path.getsize(pdf_path)
+            if file_size < 5:
+                raise ValueError(f"Downloaded PDF is empty or too small ({file_size} bytes).")
+
+            with open(pdf_path, "rb") as check_file:
+                header = check_file.read(5)
+            if header != b"%PDF-":
+                raise ValueError(
+                    f"Downloaded file is not a valid PDF. Header={header!r}. "
+                    "Check Cloudinary resource type and stored file URL."
+                )
+
+            logger.info(
+                "PDF downloaded to temporary storage | document_id=%s | bytes=%s",
+                document_id,
+                file_size,
+            )
+
+            # 2. Parse PDF.
+            stage = "pdf_parse"
+            pages = PyPDFLoader(pdf_path).load()
+            if not pages:
+                raise ValueError("PDF parser returned no pages.")
+            logger.info(
+                "PDF parsed | document_id=%s | pages=%s",
+                document_id,
+                len(pages),
+            )
+
+            # 3. Clean extracted page text.
+            stage = "text_extraction"
+            for page_number, page in enumerate(pages, start=1):
+                page.page_content = clean_pdf_text(page.page_content)
+                logger.debug(
+                    "PDF page extracted | document_id=%s | page=%s | chars=%s",
+                    document_id,
+                    page_number,
+                    len(page.page_content),
+                )
+
+            extracted_text = clean_pdf_text(
+                "\n\n".join(page.page_content for page in pages)
+            )
+            if not extracted_text:
+                raise ValueError(
+                    "No extractable text was found. This may be a scanned/image-only PDF; "
+                    "OCR is required before embedding it."
+                )
+
+            # 4. Save extracted text in the Django document record.
+            stage = "database_update"
+            pdf_document.extracted_text = extracted_text
+            pdf_document.save(update_fields=["extracted_text"])
+            logger.info(
+                "Extracted PDF text saved | document_id=%s | characters=%s",
+                document_id,
+                len(extracted_text),
+            )
+
+            # 5. Split into chunks.
+            stage = "chunking"
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                length_function=len,
+            )
+            chunks = splitter.split_documents(pages)
+
+            valid_chunks = []
+            for chunk in chunks:
+                chunk.page_content = clean_pdf_text(chunk.page_content)
+                if chunk.page_content:
+                    valid_chunks.append(chunk)
+
+            if not valid_chunks:
+                raise ValueError("Text splitter produced no non-empty chunks.")
+
+            for index, chunk in enumerate(valid_chunks):
+                chunk.metadata = dict(chunk.metadata or {})
+                chunk.metadata.update(
+                    {
+                        "document_id": int(document_id),
+                        "document_title": str(title),
+                        "chunk_index": index,
+                    }
+                )
+
+            logger.info(
+                "PDF chunking completed | document_id=%s | chunks=%s | chunk_size=1000 | overlap=200",
+                document_id,
+                len(valid_chunks),
+            )
+
+        # 6. Load embedding model and generate vectors in manageable batches.
+        stage = "embedding_model"
+        embeddings, dimension = get_embedding_model()
+        ensure_vector_table(dimension)
+
+        stage = "embedding_generation"
+        texts = [chunk.page_content for chunk in valid_chunks]
+        vectors = []
+        total_batches = (len(texts) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+
+        logger.info(
+            "Embedding generation started | document_id=%s | chunks=%s | batches=%s | dimensions=%s",
+            document_id,
+            len(texts),
+            total_batches,
+            dimension,
         )
 
-        raise PDFIngestionError(stage, e) from e
+        for batch_number, offset in enumerate(
+            range(0, len(texts), EMBEDDING_BATCH_SIZE),
+            start=1,
+        ):
+            batch_texts = texts[offset : offset + EMBEDDING_BATCH_SIZE]
+            batch_vectors = embeddings.embed_documents(batch_texts)
+            if len(batch_vectors) != len(batch_texts):
+                raise RuntimeError(
+                    f"Embedding batch {batch_number} returned {len(batch_vectors)} vectors "
+                    f"for {len(batch_texts)} chunks."
+                )
+            for vector in batch_vectors:
+                if len(vector) != dimension:
+                    raise ValueError(
+                        f"Embedding dimension mismatch in batch {batch_number}: "
+                        f"got {len(vector)}, expected {dimension}."
+                    )
+            vectors.extend(batch_vectors)
+            logger.info(
+                "Embedding batch completed | document_id=%s | batch=%s/%s | vectors=%s",
+                document_id,
+                batch_number,
+                total_batches,
+                len(batch_vectors),
+            )
+
+        # 7. Atomically replace and verify records in Supabase.
+        stage = "pgvector_storage"
+        stored_count = replace_document_embeddings(
+            document_id=document_id,
+            chunks=valid_chunks,
+            vectors=vectors,
+        )
+
+        # 8. Final independent count check.
+        stage = "embedding_verification"
+        verified_count = count_document_embeddings(document_id)
+        if verified_count != len(valid_chunks):
+            raise RuntimeError(
+                f"Final verification mismatch: expected {len(valid_chunks)}, "
+                f"found {verified_count} records for document {document_id}."
+            )
+
+        result = {
+            "document_id": document_id,
+            "total_pages": len(pages),
+            "total_characters": len(extracted_text),
+            "total_chunks": len(valid_chunks),
+            "stored_chunks": stored_count,
+            "vector_table": f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}",
+            "embedding_model": EMBEDDING_MODEL_NAME,
+            "embedding_dimensions": dimension,
+            "status": "success",
+            "message": "PDF embeddings created and verified successfully.",
+        }
+
+        logger.info(
+            "PDF ingestion completed successfully | document_id=%s | pages=%s | "
+            "characters=%s | chunks=%s | stored=%s | elapsed_seconds=%.2f",
+            document_id,
+            len(pages),
+            len(extracted_text),
+            len(valid_chunks),
+            stored_count,
+            time.monotonic() - started,
+        )
+        return result
+
+    except PDFIngestionError:
+        # Preserve an already annotated ingestion error without wrapping twice.
+        raise
+    except Exception as exc:
+        logger.exception(
+            "PDF ingestion failed | document_id=%s | stage=%s | "
+            "exception_type=%s | elapsed_seconds=%.2f",
+            document_id,
+            stage,
+            type(exc).__name__,
+            time.monotonic() - started,
+        )
+        raise PDFIngestionError(stage, exc) from exc

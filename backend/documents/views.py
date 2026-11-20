@@ -1,44 +1,46 @@
+
 import logging
 import os
 
-from rest_framework import viewsets, status
+from django.conf import settings
+from django.db import DatabaseError, connection, transaction
+from django.http import FileResponse
+
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser, FormParser
-
-from django.db import DatabaseError, connection
-from django.conf import settings
-from django.http import FileResponse
 
 from .models import PDFDocument
 from .serializers import PDFDocumentSerializer, PDFStorageError
 
-from .services.pdf_embedding_service import (
-    get_vector_store
-)
 from .services.pdf_embedding_jobs import enqueue_pdf_embedding
-
 from .services.pdf_chat_service import ask_pdf_question
 
 
 logger = logging.getLogger(__name__)
 
 
+# ==================================================
+# SAFE ERROR HANDLING
+# ==================================================
+
 def _safe_error_details(error):
     message = str(error) or "No additional error details were provided."
+
     secrets = (
-        settings.SECRET_KEY,
-        settings.DATABASE_URL,
-        settings.GROQ_API_KEY,
-        settings.CLOUDINARY_API_KEY,
-        settings.CLOUDINARY_API_SECRET,
+        getattr(settings, "SECRET_KEY", None),
+        getattr(settings, "DATABASE_URL", None),
+        getattr(settings, "GROQ_API_KEY", None),
+        getattr(settings, "CLOUDINARY_API_KEY", None),
+        getattr(settings, "CLOUDINARY_API_SECRET", None),
         os.getenv("CLOUDINARY_URL"),
     )
 
     for secret in secrets:
         if secret:
-            message = message.replace(secret, "[REDACTED]")
+            message = message.replace(str(secret), "[REDACTED]")
 
     return {
         "type": type(error).__name__,
@@ -59,6 +61,10 @@ def _upload_failure(stage, code, message, error):
     )
 
 
+# ==================================================
+# HEALTH CHECK
+# ==================================================
+
 class HealthCheckView(APIView):
 
     def get(self, request):
@@ -68,22 +74,26 @@ class HealthCheckView(APIView):
         )
 
 
+# ==================================================
+# DATABASE READINESS CHECK
+# ==================================================
+
 class ReadinessCheckView(APIView):
 
     def get(self, request):
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT 1")
-        except DatabaseError as error:
-            logger.exception(
-                "Database readiness check failed | alias=%s | reason=%s",
-                connection.alias,
-                error,
-            )
+
+        except DatabaseError:
+            logger.exception("Database readiness check failed")
+
             return Response(
                 {
                     "status": "not_ready",
-                    "checks": {"database": "unavailable"},
+                    "checks": {
+                        "database": "unavailable"
+                    },
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -91,7 +101,9 @@ class ReadinessCheckView(APIView):
         return Response(
             {
                 "status": "ready",
-                "checks": {"database": "ok"},
+                "checks": {
+                    "database": "ok"
+                },
             },
             status=status.HTTP_200_OK,
         )
@@ -107,10 +119,13 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
 
     serializer_class = PDFDocumentSerializer
 
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [
+        MultiPartParser,
+        FormParser,
+    ]
 
     # ===============================================
-    # UPLOAD PDF + QUEUE EMBEDDING JOB
+    # UPLOAD PDF AND QUEUE EMBEDDING JOB
     # ===============================================
 
     def create(self, request, *args, **kwargs):
@@ -121,54 +136,54 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
 
         try:
             pdf_document = serializer.save()
+
         except DatabaseError as error:
-            logger.exception("PDF document database insert failed")
+            logger.exception("PDF database insert failed")
+
             return _upload_failure(
                 "database_insert",
                 "PDF_DATABASE_INSERT_FAILED",
                 "The PDF could not be recorded in the database.",
                 error,
             )
+
         except PDFStorageError as error:
-            logger.exception("PDF file storage upload failed")
+            logger.exception("Cloudinary PDF upload failed")
+
             return _upload_failure(
                 "cloudinary_upload",
                 "CLOUDINARY_UPLOAD_FAILED",
-                "The PDF could not be stored by the configured Cloudinary storage.",
-                error.cause,
+                "The PDF could not be stored in Cloudinary.",
+                getattr(error, "cause", error),
             )
 
         logger.info(
-            "PDF uploaded | ID: %s | Title: %s",
+            "PDF uploaded | document_id=%s | title=%s",
             pdf_document.id,
-            pdf_document.title
+            pdf_document.title,
         )
 
+        # Queue the embedding job
         try:
             enqueue_pdf_embedding(pdf_document.id)
-        except RuntimeError as error:
-            print(
-                f"[EMBEDDING JOB] document_id={pdf_document.id} "
-                "status=failed stage=queue",
-                flush=True,
-            )
+
+        except Exception as error:
             logger.exception(
                 "Could not queue PDF embedding job | document_id=%s",
                 pdf_document.id,
             )
+
             response = _upload_failure(
                 "embedding_queue",
                 "PDF_EMBEDDING_QUEUE_FAILED",
                 "The PDF was stored, but its embedding job could not be queued.",
                 error,
             )
+
             response.data["document_id"] = pdf_document.id
+
             return response
 
-        print(
-            f"[EMBEDDING JOB] document_id={pdf_document.id} status=queued",
-            flush=True,
-        )
         logger.info(
             "PDF upload accepted | document_id=%s | embedding_status=queued",
             pdf_document.id,
@@ -185,39 +200,69 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
         )
 
     # ===============================================
-    # DELETE PDF + EMBEDDINGS
+    # DELETE PDF AND ITS EMBEDDINGS
     # ===============================================
 
     def perform_destroy(self, instance):
 
+        document_id = instance.id
+
+        # Preserve the Cloudinary storage reference before deleting
+        # the Django database record.
+        file_name = instance.pdf_file.name if instance.pdf_file else None
+        file_storage = instance.pdf_file.storage if instance.pdf_file else None
+
         try:
+            # Delete embeddings and PDF record in one DB transaction.
+            with transaction.atomic():
 
-            vector_store = get_vector_store()
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        DELETE FROM public.pdf_document_embeddings
+                        WHERE document_id = %s
+                        """,
+                        [document_id],
+                    )
 
-            vector_store.delete(
-                filter={
-                    "document_id": int(instance.id)
-                }
-            )
+                    deleted_count = cursor.rowcount
+
+                logger.info(
+                    "Deleted %s embeddings | document_id=%s",
+                    deleted_count,
+                    document_id,
+                )
+
+                instance.delete()
 
             logger.info(
-                "Embeddings deleted for document %s",
-                instance.id
+                "PDF database record deleted | document_id=%s",
+                document_id,
             )
 
-        except Exception as error:
-
+        except Exception:
             logger.exception(
-                "Failed to delete embeddings"
+                "Failed to delete PDF database record or embeddings | document_id=%s",
+                document_id,
             )
+            raise
 
-            raise error
+        # Cloudinary deletion is an external operation, so it is performed
+        # after the database transaction has committed.
+        if file_name and file_storage:
+            try:
+                file_storage.delete(file_name)
 
-        # Delete actual PDF file
-        instance.pdf_file.delete(save=False)
+                logger.info(
+                    "Cloudinary PDF file deletion requested | document_id=%s",
+                    document_id,
+                )
 
-        # Delete database record
-        instance.delete()
+            except Exception:
+                logger.exception(
+                    "PDF database record was deleted, but Cloudinary file deletion failed | document_id=%s",
+                    document_id,
+                )
 
     # ===============================================
     # DOWNLOAD PDF
@@ -228,11 +273,28 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
 
         pdf = self.get_object()
 
-        return FileResponse(
-            pdf.pdf_file.open("rb"),
-            as_attachment=True,
-            filename=pdf.title
-        )
+        try:
+            file_handle = pdf.pdf_file.open("rb")
+
+            return FileResponse(
+                file_handle,
+                as_attachment=True,
+                filename=os.path.basename(pdf.title or "document.pdf"),
+                content_type="application/pdf",
+            )
+
+        except Exception:
+            logger.exception(
+                "PDF download failed | document_id=%s",
+                pdf.id,
+            )
+
+            return Response(
+                {
+                    "error": "Unable to download this PDF."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     # ===============================================
     # GET EXTRACTED PDF TEXT
@@ -243,11 +305,14 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
 
         pdf = self.get_object()
 
-        return Response({
-            "id": pdf.id,
-            "title": pdf.title,
-            "extracted_text": pdf.extracted_text
-        })
+        return Response(
+            {
+                "id": pdf.id,
+                "title": pdf.title,
+                "extracted_text": pdf.extracted_text,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 # ==================================================
@@ -259,20 +324,19 @@ class PDFChatView(APIView):
     def post(self, request):
 
         document_id = request.data.get("document_id")
-
         question = request.data.get("question")
 
         # ===========================================
         # VALIDATE INPUT
         # ===========================================
 
-        if document_id is None or not question:
+        if document_id is None or question is None:
 
             return Response(
                 {
-                    "error": "document_id and question are required"
+                    "error": "document_id and question are required."
                 },
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         question = str(question).strip()
@@ -281,23 +345,28 @@ class PDFChatView(APIView):
 
             return Response(
                 {
-                    "error": "Question cannot be empty"
+                    "error": "Question cannot be empty."
                 },
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate document ID
-        try:
+        # ===========================================
+        # VALIDATE DOCUMENT ID
+        # ===========================================
 
+        try:
             document_id = int(document_id)
+
+            if document_id <= 0:
+                raise ValueError("Document ID must be positive.")
 
         except (TypeError, ValueError):
 
             return Response(
                 {
-                    "error": "document_id must be a valid integer"
+                    "error": "document_id must be a valid positive integer."
                 },
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # ===========================================
@@ -305,7 +374,6 @@ class PDFChatView(APIView):
         # ===========================================
 
         try:
-
             pdf_document = PDFDocument.objects.get(
                 id=document_id
             )
@@ -314,9 +382,9 @@ class PDFChatView(APIView):
 
             return Response(
                 {
-                    "error": "PDF document not found"
+                    "error": "PDF document not found."
                 },
-                status=status.HTTP_404_NOT_FOUND
+                status=status.HTTP_404_NOT_FOUND,
             )
 
         # ===========================================
@@ -324,16 +392,14 @@ class PDFChatView(APIView):
         # ===========================================
 
         logger.info(
-            "PDF chat request | Document: %s | Question: %s",
+            "PDF chat request | document_id=%s",
             document_id,
-            question
         )
 
         try:
-
             answer = ask_pdf_question(
                 document_id=pdf_document.id,
-                question=question
+                question=question,
             )
 
             return Response(
@@ -341,22 +407,20 @@ class PDFChatView(APIView):
                     "document_id": pdf_document.id,
                     "question": question,
                     "answer": answer,
-                    "status": "success"
+                    "status": "success",
                 },
-                status=status.HTTP_200_OK
+                status=status.HTTP_200_OK,
             )
 
-        except Exception as error:
-
+        except Exception:
             logger.exception(
-                "PDF chat request failed | Document ID: %s",
-                document_id
+                "PDF chat request failed | document_id=%s",
+                document_id,
             )
 
             return Response(
                 {
-                    "error": "Failed to generate AI response",
-                    "details": str(error)
+                    "error": "Failed to generate AI response. Check backend logs for details."
                 },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

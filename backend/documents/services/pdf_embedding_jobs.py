@@ -1,11 +1,16 @@
+"""Background-thread launcher for PDF embedding ingestion.
+
+Note: ThreadPoolExecutor jobs are in-process and are not durable across Render
+restarts/deploys. Use a dedicated worker/queue for guaranteed production jobs.
+"""
+
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 
 from ..models import PDFDocument
 from .pdf_embedding_service import PDFIngestionError, create_pdf_embeddings
-
 
 logger = logging.getLogger(__name__)
 
@@ -16,59 +21,85 @@ _executor = ThreadPoolExecutor(
 
 
 def run_pdf_embedding_job(document_id):
+    """Load a PDF document and run ingestion in a worker thread."""
     close_old_connections()
     stage = "load_document"
 
+    logger.info(
+        "PDF embedding job started | document_id=%s",
+        document_id,
+    )
+
     try:
-        print(
-            f"[EMBEDDING JOB] document_id={document_id} status=started",
-            flush=True,
-        )
-        logger.info(
-            "PDF embedding job started | document_id=%s | status=started",
-            document_id,
-        )
         pdf_document = PDFDocument.objects.get(pk=document_id)
-        stage = "embedding"
-        result = create_pdf_embeddings(pdf_document)
-    except PDFIngestionError as error:
-        print(
-            f"[EMBEDDING JOB] document_id={document_id} "
-            f"status=failed stage={error.stage}",
-            flush=True,
-        )
-        logger.exception(
-            "PDF embedding job finished | document_id=%s | status=failed | stage=%s",
+        logger.info(
+            "PDF embedding job loaded document | document_id=%s | title=%s",
             document_id,
-            error.stage,
+            pdf_document.title,
         )
-    except Exception:
-        print(
-            f"[EMBEDDING JOB] document_id={document_id} "
-            f"status=failed stage={stage}",
-            flush=True,
+
+        stage = "ingestion"
+        result = create_pdf_embeddings(pdf_document)
+
+        logger.info(
+            "PDF embedding job completed | document_id=%s | status=%s | "
+            "pages=%s | chunks=%s | stored_chunks=%s",
+            document_id,
+            result.get("status"),
+            result.get("total_pages"),
+            result.get("total_chunks"),
+            result.get("stored_chunks"),
         )
+        return result
+
+    except PDFDocument.DoesNotExist:
         logger.exception(
-            "PDF embedding job finished | document_id=%s | status=failed | stage=%s",
+            "PDF embedding job failed: document does not exist | document_id=%s | stage=%s",
             document_id,
             stage,
         )
-    else:
-        print(
-            f"[EMBEDDING JOB] document_id={document_id} "
-            f"status=completed pages={result.get('total_pages')} "
-            f"chunks={result.get('total_chunks')}",
-            flush=True,
-        )
-        logger.info(
-            "PDF embedding job finished | document_id=%s | status=completed | pages=%s | chunks=%s",
+        raise
+
+    except PDFIngestionError as exc:
+        logger.exception(
+            "PDF embedding job failed | document_id=%s | stage=%s | "
+            "cause_type=%s | cause=%s",
             document_id,
-            result.get("total_pages"),
-            result.get("total_chunks"),
+            exc.stage,
+            type(exc.cause).__name__,
+            exc.cause,
         )
+        raise
+
+    except Exception:
+        logger.exception(
+            "PDF embedding job failed unexpectedly | document_id=%s | stage=%s",
+            document_id,
+            stage,
+        )
+        raise
+
     finally:
-        close_old_connections()
+        # Django DB connections are thread-local; close them in this worker.
+        connections.close_all()
+        logger.info(
+            "PDF embedding worker database connections closed | document_id=%s",
+            document_id,
+        )
 
 
 def enqueue_pdf_embedding(document_id):
-    return _executor.submit(run_pdf_embedding_job, document_id)
+    """Queue a job and return its Future to the caller."""
+    try:
+        future = _executor.submit(run_pdf_embedding_job, document_id)
+        logger.info(
+            "PDF embedding job queued | document_id=%s",
+            document_id,
+        )
+        return future
+    except Exception:
+        logger.exception(
+            "Unable to enqueue PDF embedding job | document_id=%s",
+            document_id,
+        )
+        raise

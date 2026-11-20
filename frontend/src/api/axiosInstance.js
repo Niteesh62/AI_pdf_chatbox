@@ -1,9 +1,9 @@
 import axios from "axios";
 
-console.log("API_BASE_URL:", import.meta.env.API_BASE_URL, "VITE_API_BASE_URL:", import.meta.env.VITE_API_BASE_URL);
 const API = axios.create({
     baseURL:
-        "https://ai-pdf-chatbox-mxdw.onrender.com/api/"
+        // "https://ai-pdf-chatbox-mxdw.onrender.com/api/"
+        "http://localhost:8000/api/",
 });
 
 export default API;
