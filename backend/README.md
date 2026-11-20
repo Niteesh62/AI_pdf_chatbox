@@ -60,8 +60,10 @@ Create `backend/.env`:
 
 ```env
 SECRET_KEY=generate_a_unique_secret_key
+DEBUG=True
+SECURE_SSL_REDIRECT=False
 GROQ_API_KEY=your_groq_api_key
-CORS_ALLOWED_ORIGINS=http://localhost:5173
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 CLOUDINARY_CLOUD_NAME=your_cloud_name
 CLOUDINARY_API_KEY=your_api_key
 CLOUDINARY_API_SECRET=your_api_secret
@@ -77,6 +79,10 @@ python -c "from django.core.management.utils import get_random_secret_key; print
 
 Set the generated value as `SECRET_KEY` in Render's environment variables.
 Never use the development fallback as a production secret.
+For local development, use `DEBUG=True` and `SECURE_SSL_REDIRECT=False` so
+Django's HTTP development server does not redirect API requests to HTTPS. In
+Render, use `DEBUG=False` and `SECURE_SSL_REDIRECT=True` (or leave the redirect
+setting unset, since it defaults to enabled when `DEBUG=False`).
 
 Create a Cloudinary account and set its cloud name, API key, and API secret
 above. PDF uploads use Cloudinary raw storage; Django reads them from Cloudinary
@@ -89,8 +95,14 @@ the database and Cloudinary API connection. These logs never print credential
 values.
 
 Set `CORS_ALLOWED_ORIGINS` to a comma-separated list when allowing additional
-frontend origins. If it is unset, the development origin
-`http://localhost:5173` is used.
+frontend origins. If it is unset, `http://localhost:5173` and
+`http://127.0.0.1:5173` are allowed for development.
+
+Upload failures return a JSON `stage`, `code`, and `details` so you can
+distinguish Cloudinary storage failures from database, PDF parsing, and
+embedding/vector-store failures. When the browser receives no HTTP response,
+check the API URL, backend availability, HTTPS configuration, and whether the
+frontend origin is included in `CORS_ALLOWED_ORIGINS`.
 
 Create the MySQL database:
 

@@ -1,7 +1,9 @@
 import logging
 import os
 
+import cloudinary
 import cloudinary.api
+from django.conf import settings
 from django.db import connections
 
 
@@ -42,6 +44,12 @@ def check_external_services():
         logger.info("Database connection established")
 
     try:
+        cloudinary.config(
+            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+            api_key=settings.CLOUDINARY_API_KEY,
+            api_secret=settings.CLOUDINARY_API_SECRET,
+            secure=True,
+        )
         result = cloudinary.api.ping(timeout=10)
         if result.get("status") != "ok":
             reason = _redact(

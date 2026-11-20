@@ -48,13 +48,16 @@ npm run dev
 
 Open `http://localhost:5173/`.
 
-The API base URL is configured in `src/api/axiosInstance.js`:
+The API base URL defaults to the local backend and can be overridden with the
+Vite environment variable `VITE_API_BASE_URL`:
 
-```javascript
-baseURL: "http://127.0.0.1:8000/api/"
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000/api/
 ```
 
-Change this value if the backend is hosted on another machine or port.
+Set it to the deployed backend URL for production builds. The backend must
+allow the frontend's exact origin in `CORS_ALLOWED_ORIGINS`; an HTTPS frontend
+must use an HTTPS API.
 
 ## Available Scripts
 

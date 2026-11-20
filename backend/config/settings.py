@@ -1,12 +1,14 @@
 
 """
 Django settings for config project.
+Local development: Django + Supabase PostgreSQL + Cloudinary
 Production: Render + Supabase PostgreSQL + Cloudinary
 """
 
 import os
 from pathlib import Path
 
+import cloudinary
 import dj_database_url
 from dotenv import load_dotenv
 
@@ -17,46 +19,65 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load local .env file.
-# Render environment variables are read directly from os.environ.
-load_dotenv(BASE_DIR / ".env")
+ENV_FILE = BASE_DIR / ".env"
 
-REQUIRED_ENVIRONMENT_VARIABLES = (
-    "DATABASE_URL",
+# Load local environment variables
+load_dotenv(ENV_FILE, override=True)
+
+
+def get_env(name, default=""):
+    """Read environment variables safely."""
+    return os.getenv(name, default).strip()
+
+
+DEBUG = get_env("DEBUG", "False").lower() == "true"
+
+SECRET_KEY = get_env(
+    "SECRET_KEY",
+    "django-insecure-local-development-key"
+)
+
+if not DEBUG and (
+    not SECRET_KEY
+    or SECRET_KEY == "django-insecure-local-development-key"
+):
+    raise ValueError(
+        "Set a secure SECRET_KEY in production environment variables."
+    )
+
+
+# ==================================================
+# 2. ENVIRONMENT VARIABLE CHECK
+# ==================================================
+
+REQUIRED_ENVIRONMENT_VARIABLES = [
     "SECRET_KEY",
     "GROQ_API_KEY",
     "CLOUDINARY_CLOUD_NAME",
     "CLOUDINARY_API_KEY",
     "CLOUDINARY_API_SECRET",
-)
+]
 
-print("[startup] Checking required environment variables:")
+print("\n========== ENVIRONMENT CHECK ==========")
+
 for variable in REQUIRED_ENVIRONMENT_VARIABLES:
-    configured = bool(os.getenv(variable, "").strip())
-    state = "configured" if configured else "MISSING"
-    print(f"[startup] {variable}: {state}", flush=True)
+    value = get_env(variable)
+    print(
+        f"[CONFIG] {variable}: "
+        f"{'CONFIGURED' if value else 'MISSING'}",
+        flush=True
+    )
 
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
-
-SECRET_KEY = os.getenv(
-    "SECRET_KEY",
-    "django-insecure-development-only-change-this"
-)
-
-if not DEBUG and (
-    not SECRET_KEY
-    or SECRET_KEY == "django-insecure-development-only-change-this"
-):
-    raise ValueError("Set a secure SECRET_KEY in Render Environment Variables.")
+print("=======================================\n")
 
 
 # ==================================================
-# 2. ALLOWED HOSTS
+# 3. ALLOWED HOSTS
 # ==================================================
 
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.getenv(
+    for host in get_env(
         "ALLOWED_HOSTS",
         "localhost,127.0.0.1,.onrender.com"
     ).split(",")
@@ -65,12 +86,12 @@ ALLOWED_HOSTS = [
 
 
 # ==================================================
-# 3. CORS AND CSRF CONFIGURATION
+# 4. CORS AND CSRF
 # ==================================================
 
 CORS_ALLOWED_ORIGINS = [
     origin.strip().rstrip("/")
-    for origin in os.getenv(
+    for origin in get_env(
         "CORS_ALLOWED_ORIGINS",
         "http://localhost:5173,http://127.0.0.1:5173"
     ).split(",")
@@ -79,27 +100,24 @@ CORS_ALLOWED_ORIGINS = [
 
 CSRF_TRUSTED_ORIGINS = [
     origin.strip().rstrip("/")
-    for origin in os.getenv(
+    for origin in get_env(
         "CSRF_TRUSTED_ORIGINS",
-        "https://ai-pdf-chatbox-mxdw.onrender.com"
+        "http://localhost:5173,http://127.0.0.1:5173,https://ai-pdf-chatbox-mxdw.onrender.com"
     ).split(",")
     if origin.strip()
 ]
 
-# Apply CORS to API endpoints.
 CORS_URLS_REGEX = r"^/api/.*$"
 
-# Enable this only if your frontend uses cross-origin cookies.
 CORS_ALLOW_CREDENTIALS = False
 
 
 # ==================================================
-# 4. APPLICATION DEFINITION
+# 5. INSTALLED APPS
 # ==================================================
 
 INSTALLED_APPS = [
 
-    # Django built-in apps
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -107,29 +125,25 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
 
-    # Third-party apps
     "rest_framework",
     "corsheaders",
 
-    # Cloudinary
     "cloudinary",
     "cloudinary_storage",
 
-    # Local apps
     "documents.apps.DocumentsConfig",
 ]
 
 
 # ==================================================
-# 5. MIDDLEWARE
+# 6. MIDDLEWARE
 # ==================================================
 
 MIDDLEWARE = [
 
-    "django.middleware.security.SecurityMiddleware",
-
-    # CORS must be before CommonMiddleware
     "corsheaders.middleware.CorsMiddleware",
+
+    "django.middleware.security.SecurityMiddleware",
 
     "django.contrib.sessions.middleware.SessionMiddleware",
 
@@ -146,7 +160,7 @@ MIDDLEWARE = [
 
 
 # ==================================================
-# 6. URL AND WSGI CONFIGURATION
+# 7. URL CONFIGURATION
 # ==================================================
 
 ROOT_URLCONF = "config.urls"
@@ -155,17 +169,14 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 
 # ==================================================
-# 7. TEMPLATES
+# 8. TEMPLATES
 # ==================================================
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-
         "DIRS": [],
-
         "APP_DIRS": True,
-
         "OPTIONS": {
             "context_processors": [
                 "django.template.context_processors.request",
@@ -178,48 +189,66 @@ TEMPLATES = [
 
 
 # ==================================================
-# 8. SUPABASE POSTGRESQL DATABASE
+# 9. DATABASE CONFIGURATION
 # ==================================================
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = get_env("DATABASE_URL")
 
-if not DATABASE_URL:
+if DATABASE_URL:
+
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,
+            conn_health_checks=True,
+            ssl_require=True,
+        )
+    }
+
+elif DEBUG:
+
+    # Local fallback when DATABASE_URL is not configured
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
+
+else:
+
     raise ValueError(
-        "DATABASE_URL is missing from environment variables!"
+        "DATABASE_URL is required in production."
     )
-
-DATABASES = {
-    "default": dj_database_url.parse(
-        DATABASE_URL,
-        conn_max_age=600,
-        conn_health_checks=True,
-        ssl_require=True,
-    )
-}
 
 
 # ==================================================
-# 9. PASSWORD VALIDATION
+# 10. PASSWORD VALIDATION
 # ==================================================
 
 AUTH_PASSWORD_VALIDATORS = [
+
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
+
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
     },
+
     {
         "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
+
     {
         "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
+
 ]
 
 
 # ==================================================
-# 10. INTERNATIONALIZATION
+# 11. INTERNATIONALIZATION
 # ==================================================
 
 LANGUAGE_CODE = "en-us"
@@ -232,7 +261,7 @@ USE_TZ = True
 
 
 # ==================================================
-# 11. STATIC FILES
+# 12. STATIC FILES
 # ==================================================
 
 STATIC_URL = "/static/"
@@ -241,13 +270,11 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 
 # ==================================================
-# 12. MEDIA FILES
+# 13. MEDIA FILES
 # ==================================================
 
 MEDIA_URL = "/media/"
 
-# Local fallback directory.
-# The configured default storage below uses Cloudinary.
 MEDIA_ROOT = BASE_DIR / "media"
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
@@ -256,40 +283,57 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 
 
 # ==================================================
-# 13. CLOUDINARY CONFIGURATION
+# 14. CLOUDINARY CONFIGURATION
 # ==================================================
 
-CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_CLOUD_NAME = get_env("CLOUDINARY_CLOUD_NAME")
 
-CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_KEY = get_env("CLOUDINARY_API_KEY")
 
-CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
-
-
-CLOUDINARY_STORAGE = {
-    "CLOUD_NAME": CLOUDINARY_CLOUD_NAME,
-    "API_KEY": CLOUDINARY_API_KEY,
-    "API_SECRET": CLOUDINARY_API_SECRET,
-
-    # Organize uploaded PDFs in Cloudinary
-    "FOLDER": "ai_pdf_chatbox",
-}
+CLOUDINARY_API_SECRET = get_env("CLOUDINARY_API_SECRET")
 
 
 # Validate Cloudinary credentials
+
 if not all([
     CLOUDINARY_CLOUD_NAME,
     CLOUDINARY_API_KEY,
     CLOUDINARY_API_SECRET,
 ]):
+
     raise ValueError(
         "Cloudinary credentials are missing. "
-        "Check CLOUDINARY_CLOUD_NAME, "
-        "CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET."
+        "Check your backend .env file."
     )
 
 
+# Explicitly initialize Cloudinary SDK
+
+cloudinary.config(
+    cloud_name=CLOUDINARY_CLOUD_NAME,
+    api_key=CLOUDINARY_API_KEY,
+    api_secret=CLOUDINARY_API_SECRET,
+    secure=True,
+)
+
+
+# Django Cloudinary Storage Configuration
+
+CLOUDINARY_STORAGE = {
+
+    "CLOUD_NAME": CLOUDINARY_CLOUD_NAME,
+
+    "API_KEY": CLOUDINARY_API_KEY,
+
+    "API_SECRET": CLOUDINARY_API_SECRET,
+
+    "FOLDER": "ai_pdf_chatbox",
+
+}
+
+
 # Django 5.2 storage configuration
+
 STORAGES = {
 
     "default": {
@@ -304,38 +348,39 @@ STORAGES = {
 
 
 # ==================================================
-# 14. DEFAULT PRIMARY KEY
+# 15. DEFAULT PRIMARY KEY
 # ==================================================
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 # ==================================================
-# 15. GROQ AI CONFIGURATION
+# 16. GROQ AI CONFIGURATION
 # ==================================================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = get_env("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
     print("[WARNING] GROQ_API_KEY is missing.")
 
 
 # ==================================================
-# 16. RENDER HTTPS CONFIGURATION
+# 17. RENDER HTTPS CONFIGURATION
 # ==================================================
 
-# Render runs behind a reverse proxy.
 SECURE_PROXY_SSL_HEADER = (
     "HTTP_X_FORWARDED_PROTO",
     "https",
 )
 
-# Redirect HTTP requests to HTTPS in production.
-SECURE_SSL_REDIRECT = not DEBUG
+SECURE_SSL_REDIRECT = get_env(
+    "SECURE_SSL_REDIRECT",
+    str(not DEBUG),
+).lower() == "true"
 
 
 # ==================================================
-# 17. LOGGING CONFIGURATION
+# 18. LOGGING CONFIGURATION
 # ==================================================
 
 LOGGING = {
@@ -375,27 +420,31 @@ LOGGING = {
             "propagate": False,
         },
     },
+
 }
 
 
 # ==================================================
-# 18. FINAL SETTINGS DEBUG INFORMATION
+# 19. FINAL CONFIGURATION INFORMATION
 # ==================================================
 
 print("\n========== DJANGO SETTINGS LOADED ==========")
 
 print("[CONFIG] DEBUG:", DEBUG)
 
-print("[CONFIG] ALLOWED_HOSTS:", ALLOWED_HOSTS)
+print("[CONFIG] DATABASE:", "PostgreSQL" if DATABASE_URL else "SQLite")
 
-print("[CONFIG] CORS ORIGINS:", CORS_ALLOWED_ORIGINS)
+print("[CONFIG] Cloudinary Cloud:", CLOUDINARY_CLOUD_NAME)
 
-print("[CONFIG] Database configured:", bool(DATABASE_URL))
+print(
+    "[CONFIG] Cloudinary API Key Last 4:",
+    CLOUDINARY_API_KEY[-4:]
+)
 
-print("[CONFIG] Cloudinary configured:", bool(CLOUDINARY_CLOUD_NAME))
+print("[CONFIG] Cloudinary SDK initialized:", True)
 
-print("[CONFIG] Default storage: Cloudinary Raw Media")
+print("[CONFIG] Default Storage: Cloudinary Raw Media")
 
-print("[CONFIG] HTTPS redirect:", SECURE_SSL_REDIRECT)
+print("[CONFIG] HTTPS Redirect:", SECURE_SSL_REDIRECT)
 
 print("========== SETTINGS READY ==========\n")

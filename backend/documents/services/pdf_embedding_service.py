@@ -28,6 +28,15 @@ VECTOR_DB_PATH = os.path.join(
 
 COLLECTION_NAME = "pdf_documents_groq"
 
+
+class PDFIngestionError(Exception):
+
+    def __init__(self, stage, cause):
+        self.stage = stage
+        self.cause = cause
+        super().__init__(str(cause))
+
+
 print("\n" + "=" * 60)
 print("PDF INGESTION SERVICE LOADED")
 print("=" * 60)
@@ -168,6 +177,8 @@ def create_pdf_embeddings(pdf_document):
     print("[DOCUMENT] Title:", pdf_document.title)
     print("[DOCUMENT] File:", pdf_document.pdf_file.name)
 
+    stage = "cloudinary_download"
+
     try:
 
         # ------------------------------------------
@@ -219,6 +230,7 @@ def create_pdf_embeddings(pdf_document):
             # STEP 2: LOAD PDF
             # --------------------------------------
 
+            stage = "pdf_parse"
             print("\n[STEP 2] Loading PDF with PyPDFLoader...")
 
             loader = PyPDFLoader(pdf_path)
@@ -246,6 +258,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 3: CLEAN EXTRACTED TEXT
         # ------------------------------------------
 
+        stage = "text_extraction"
         print("\n[STEP 3] Extracting and cleaning PDF text...")
 
         for index, page in enumerate(pages):
@@ -288,6 +301,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 4: SAVE CLEAN TEXT TO DATABASE
         # ------------------------------------------
 
+        stage = "database_update"
         print("\n[STEP 4] Saving extracted text to database...")
 
         # Clean once more before database save
@@ -305,6 +319,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 5: SPLIT INTO CHUNKS
         # ------------------------------------------
 
+        stage = "chunking"
         print("\n[STEP 5] Splitting PDF into chunks...")
 
         splitter = RecursiveCharacterTextSplitter(
@@ -370,6 +385,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 7: CONNECT VECTOR STORE
         # ------------------------------------------
 
+        stage = "vector_store_connect"
         print("\n[STEP 7] Connecting ChromaDB...")
 
         vector_store = get_vector_store()
@@ -378,6 +394,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 8: DELETE OLD DOCUMENT CHUNKS
         # ------------------------------------------
 
+        stage = "old_embedding_cleanup"
         print("\n[STEP 8] Removing old document chunks...")
 
         vector_store.delete(
@@ -392,6 +409,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 9: GENERATE EMBEDDINGS
         # ------------------------------------------
 
+        stage = "embedding_generation_and_storage"
         print("\n[STEP 9] Generating and storing embeddings...")
 
         chunk_ids = [
@@ -413,6 +431,7 @@ def create_pdf_embeddings(pdf_document):
         # STEP 10: VERIFY STORAGE
         # ------------------------------------------
 
+        stage = "embedding_verification"
         print("\n[STEP 10] Verifying ChromaDB records...")
 
         stored_data = vector_store.get(
@@ -475,4 +494,4 @@ def create_pdf_embeddings(pdf_document):
             pdf_document.id
         )
 
-        raise
+        raise PDFIngestionError(stage, e) from e

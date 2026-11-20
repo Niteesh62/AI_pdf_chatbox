@@ -1,4 +1,5 @@
 import logging
+import os
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -7,12 +8,14 @@ from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 
 from django.db import DatabaseError, connection
+from django.conf import settings
 from django.http import FileResponse
 
 from .models import PDFDocument
-from .serializers import PDFDocumentSerializer
+from .serializers import PDFDocumentSerializer, PDFStorageError
 
 from .services.pdf_embedding_service import (
+    PDFIngestionError,
     create_pdf_embeddings,
     get_vector_store
 )
@@ -21,6 +24,50 @@ from .services.pdf_chat_service import ask_pdf_question
 
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_error_details(error):
+    message = str(error) or "No additional error details were provided."
+    secrets = (
+        settings.SECRET_KEY,
+        settings.DATABASE_URL,
+        settings.GROQ_API_KEY,
+        settings.CLOUDINARY_API_KEY,
+        settings.CLOUDINARY_API_SECRET,
+        os.getenv("CLOUDINARY_URL"),
+    )
+
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+
+    return {
+        "type": type(error).__name__,
+        "message": message,
+    }
+
+
+def _upload_failure(stage, code, message, error):
+    return Response(
+        {
+            "status": "failed",
+            "stage": stage,
+            "code": code,
+            "message": message,
+            "details": _safe_error_details(error),
+        },
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
+
+
+def _pdf_ingestion_error_code(stage):
+    if stage.startswith("cloudinary"):
+        return "CLOUDINARY_DOWNLOAD_FAILED"
+    if stage.startswith("database"):
+        return "PDF_DATABASE_UPDATE_FAILED"
+    if "embedding" in stage or "vector_store" in stage:
+        return "PDF_EMBEDDING_FAILED"
+    return "PDF_PROCESSING_FAILED"
 
 
 class HealthCheckView(APIView):
@@ -83,7 +130,24 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
 
         serializer.is_valid(raise_exception=True)
 
-        pdf_document = serializer.save()
+        try:
+            pdf_document = serializer.save()
+        except DatabaseError as error:
+            logger.exception("PDF document database insert failed")
+            return _upload_failure(
+                "database_insert",
+                "PDF_DATABASE_INSERT_FAILED",
+                "The PDF could not be recorded in the database.",
+                error,
+            )
+        except PDFStorageError as error:
+            logger.exception("PDF file storage upload failed")
+            return _upload_failure(
+                "cloudinary_upload",
+                "CLOUDINARY_UPLOAD_FAILED",
+                "The PDF could not be stored by the configured Cloudinary storage.",
+                error.cause,
+            )
 
         logger.info(
             "PDF uploaded | ID: %s | Title: %s",
@@ -112,21 +176,30 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_201_CREATED
             )
 
-        except Exception as error:
-
+        except PDFIngestionError as error:
             logger.exception(
-                "PDF embedding creation failed"
+                "PDF ingestion failed at stage %s",
+                error.stage,
             )
 
-            return Response(
-                {
-                    "message": "PDF uploaded, but embedding creation failed",
-                    "status": "failed",
-                    "document_id": pdf_document.id,
-                    "error": str(error)
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            response = _upload_failure(
+                error.stage,
+                _pdf_ingestion_error_code(error.stage),
+                "The PDF was stored, but processing or embedding creation failed.",
+                error.cause,
             )
+            response.data["document_id"] = pdf_document.id
+            return response
+        except Exception as error:
+            logger.exception("Unexpected PDF ingestion failure")
+            response = _upload_failure(
+                "pdf_ingestion",
+                "PDF_INGESTION_FAILED",
+                "The PDF was stored, but processing or embedding creation failed.",
+                error,
+            )
+            response.data["document_id"] = pdf_document.id
+            return response
 
     # ===============================================
     # DELETE PDF + EMBEDDINGS

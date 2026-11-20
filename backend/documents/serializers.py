@@ -1,6 +1,14 @@
 
+from django.db import DatabaseError
 from rest_framework import serializers
 from .models import PDFDocument
+
+
+class PDFStorageError(Exception):
+
+    def __init__(self, cause):
+        self.cause = cause
+        super().__init__(str(cause))
 
 
 class PDFDocumentSerializer(serializers.ModelSerializer):
@@ -39,4 +47,9 @@ class PDFDocumentSerializer(serializers.ModelSerializer):
             uploaded_file.content_type or 'application/pdf'
         )
 
-        return PDFDocument.objects.create(**validated_data)
+        try:
+            return PDFDocument.objects.create(**validated_data)
+        except DatabaseError:
+            raise
+        except Exception as error:
+            raise PDFStorageError(error) from error

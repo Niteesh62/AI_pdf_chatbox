@@ -71,14 +71,50 @@ const Pdf_uploader = ({ onUpload }) => {
       setFile(null);
 
     } catch (err) {
-      console.error("Upload error:", err.response?.data || err.message);
+      const responseData = err.response?.data;
+      const detailMessage =
+        typeof responseData?.details === "string"
+          ? responseData.details
+          : responseData?.details?.message;
+      const validationMessage =
+        responseData &&
+        typeof responseData === "object" &&
+        Object.values(responseData)
+          .flatMap((value) => (Array.isArray(value) ? value : []))
+          .filter((value) => typeof value === "string")
+          .join(" ");
 
-      setError(
-        err.response?.data?.detail ||
-        err.response?.data?.error ||
-        err.message ||
-        "PDF upload failed. Please try again."
-      );
+      console.error("PDF upload failed:", {
+        endpoint: `${API.defaults.baseURL}pdfs/`,
+        origin: window.location.origin,
+        response: responseData,
+        message: err.message,
+      });
+
+      if (responseData) {
+        setError(
+          [
+            responseData.message ||
+              responseData.detail ||
+              responseData.error ||
+              validationMessage ||
+              (typeof responseData === "string" && responseData) ||
+              err.message ||
+              "PDF upload failed.",
+            responseData.stage && `Stage: ${responseData.stage}.`,
+            responseData.code && `Code: ${responseData.code}.`,
+            detailMessage,
+          ]
+            .filter(Boolean)
+            .join(" ")
+        );
+      } else if (err.request) {
+        setError(
+          `No response from the API at ${API.defaults.baseURL}. Check that the backend is running, VITE_API_BASE_URL is correct, and this frontend origin (${window.location.origin}) is allowed by CORS. HTTPS frontends also require an HTTPS API. Browser error: ${err.message}`
+        );
+      } else {
+        setError(err.message || "PDF upload failed. Please try again.");
+      }
 
     } finally {
       setLoading(false);
