@@ -6,13 +6,16 @@ import uuid
 import re
 import traceback
 import logging
+import threading
 
 from django.conf import settings
+from django.db import connection
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+from langchain_postgres import PGEngine, PGVectorStore
+from sqlalchemy.engine import URL
 
 
 # ==================================================
@@ -21,12 +24,15 @@ from langchain_chroma import Chroma
 
 logger = logging.getLogger(__name__)
 
-VECTOR_DB_PATH = os.path.join(
-    settings.BASE_DIR,
-    "vectorstore"
-)
-
-COLLECTION_NAME = "pdf_documents_groq"
+VECTOR_SCHEMA_NAME = "public"
+VECTOR_TABLE_NAME = "pdf_document_embeddings"
+VECTOR_METADATA_COLUMNS = [
+    "document_id",
+    "document_title",
+    "chunk_index",
+]
+_vector_store = None
+_vector_store_lock = threading.Lock()
 
 
 class PDFIngestionError(Exception):
@@ -42,9 +48,8 @@ print("PDF INGESTION SERVICE LOADED")
 print("=" * 60)
 
 print("[CONFIG] BASE_DIR:", settings.BASE_DIR)
-print("[CONFIG] Vector DB Path:", VECTOR_DB_PATH)
-print("[CONFIG] Collection:", COLLECTION_NAME)
-print("[CONFIG] Vector DB exists:", os.path.exists(VECTOR_DB_PATH))
+print("[CONFIG] Vector store: Supabase PostgreSQL pgvector")
+print("[CONFIG] Vector table:", f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}")
 
 
 # ==================================================
@@ -110,7 +115,7 @@ def get_embedding_model():
         print("[EMBEDDING] Test successful")
         print("[EMBEDDING] Vector dimensions:", len(test_embedding))
 
-        return embeddings
+        return embeddings, len(test_embedding)
 
     except Exception as e:
 
@@ -121,46 +126,154 @@ def get_embedding_model():
 
 
 # ==================================================
-# 4. CONNECT TO CHROMADB
+# 4. CONNECT TO POSTGRESQL PGVECTOR
 # ==================================================
+
+def _ensure_vector_table(vector_size):
+
+    if connection.vendor != "postgresql":
+        raise RuntimeError(
+            "pgvector requires PostgreSQL. Configure DATABASE_URL "
+            "with a PostgreSQL connection string."
+        )
+
+    vector_size = int(vector_size)
+    if vector_size <= 0:
+        raise ValueError("The embedding model returned an invalid vector size.")
+
+    schema = connection.ops.quote_name(VECTOR_SCHEMA_NAME)
+    table = connection.ops.quote_name(VECTOR_TABLE_NAME)
+
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        cursor.execute(
+            """
+            SELECT namespace.nspname
+            FROM pg_extension AS extension
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = extension.extnamespace
+            WHERE extension.extname = %s
+            """,
+            ["vector"],
+        )
+        extension_schema_row = cursor.fetchone()
+        if not extension_schema_row:
+            raise RuntimeError(
+                "The PostgreSQL vector extension is not available."
+            )
+
+        extension_schema = extension_schema_row[0]
+        vector_type = (
+            f"{connection.ops.quote_name(extension_schema)}."
+            f"{connection.ops.quote_name('vector')}({vector_size})"
+        )
+        cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.{table} (
+                "langchain_id" UUID PRIMARY KEY,
+                "content" TEXT NOT NULL,
+                "embedding" {vector_type} NOT NULL,
+                "document_id" BIGINT NOT NULL,
+                "document_title" TEXT,
+                "chunk_index" BIGINT,
+                "langchain_metadata" JSON
+            )
+            """
+        )
+    return extension_schema
+
 
 def get_vector_store():
 
-    print("\n[CHROMADB] Connecting to ChromaDB...")
+    global _vector_store
 
-    try:
+    if _vector_store is not None:
+        return _vector_store
 
-        os.makedirs(
-            VECTOR_DB_PATH,
-            exist_ok=True
+    with _vector_store_lock:
+        if _vector_store is not None:
+            return _vector_store
+
+        print("\n[PGVECTOR] Connecting to Supabase PostgreSQL...")
+
+        try:
+            if connection.vendor != "postgresql":
+                raise RuntimeError(
+                    "pgvector requires PostgreSQL. Configure DATABASE_URL "
+                    "with a PostgreSQL connection string."
+                )
+
+            embeddings, vector_size = get_embedding_model()
+            extension_schema = _ensure_vector_table(vector_size)
+
+            params = connection.get_connection_params()
+            query = {}
+            if params.get("sslmode"):
+                query["sslmode"] = params["sslmode"]
+
+            database_url = URL.create(
+                "postgresql+psycopg",
+                username=params.get("user") or None,
+                password=params.get("password") or None,
+                host=params.get("host") or None,
+                port=int(params["port"]) if params.get("port") else None,
+                database=params.get("dbname") or None,
+                query=query,
+            )
+            engine = PGEngine.from_connection_string(
+                database_url,
+                connect_args={
+                    "prepare_threshold": params.get("prepare_threshold"),
+                    "options": (
+                        f"-c search_path={VECTOR_SCHEMA_NAME},{extension_schema}"
+                    ),
+                },
+            )
+
+            _vector_store = PGVectorStore.create_sync(
+                engine=engine,
+                embedding_service=embeddings,
+                table_name=VECTOR_TABLE_NAME,
+                schema_name=VECTOR_SCHEMA_NAME,
+                content_column="content",
+                embedding_column="embedding",
+                metadata_columns=VECTOR_METADATA_COLUMNS,
+                id_column="langchain_id",
+                metadata_json_column="langchain_metadata",
+            )
+
+            print(
+                f"[PGVECTOR] Connected table="
+                f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}",
+                flush=True,
+            )
+            return _vector_store
+
+        except Exception as error:
+            print(
+                f"[PGVECTOR ERROR] {type(error).__name__}: {error}",
+                flush=True,
+            )
+            traceback.print_exc()
+            logger.exception("Could not initialize the PostgreSQL vector store")
+            raise
+
+
+def count_document_embeddings(document_id):
+
+    schema = connection.ops.quote_name(VECTOR_SCHEMA_NAME)
+    table = connection.ops.quote_name(VECTOR_TABLE_NAME)
+    document_id_column = connection.ops.quote_name("document_id")
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {schema}.{table} "
+            f"WHERE {document_id_column} = %s",
+            [int(document_id)],
         )
+        result = cursor.fetchone()
 
-        print("[CHROMADB] Storage directory:", VECTOR_DB_PATH)
-        print("[CHROMADB] Directory writable:",
-              os.access(VECTOR_DB_PATH, os.W_OK))
-
-        embeddings = get_embedding_model()
-
-        vector_store = Chroma(
-            collection_name=COLLECTION_NAME,
-            embedding_function=embeddings,
-            persist_directory=VECTOR_DB_PATH
-        )
-
-        print("[CHROMADB] Connected successfully")
-
-        count = vector_store._collection.count()
-
-        print("[CHROMADB] Existing records:", count)
-
-        return vector_store
-
-    except Exception as e:
-
-        print("[CHROMADB ERROR]", str(e))
-        traceback.print_exc()
-
-        raise
+    return int(result[0]) if result else 0
 
 
 # ==================================================
@@ -380,7 +493,7 @@ def create_pdf_embeddings(pdf_document):
         # ------------------------------------------
 
         stage = "vector_store_connect"
-        print("\n[STEP 7] Connecting ChromaDB...")
+        print("\n[STEP 7] Connecting to Supabase pgvector...")
 
         vector_store = get_vector_store()
 
@@ -392,12 +505,12 @@ def create_pdf_embeddings(pdf_document):
         print("\n[STEP 8] Removing old document chunks...")
 
         vector_store.delete(
-            where={
+            filter={
                 "document_id": int(pdf_document.id)
             }
         )
 
-        print("[CHROMADB] Old chunks deleted")
+        print("[PGVECTOR] Old chunks deleted")
 
         # ------------------------------------------
         # STEP 9: GENERATE EMBEDDINGS
@@ -426,16 +539,9 @@ def create_pdf_embeddings(pdf_document):
         # ------------------------------------------
 
         stage = "embedding_verification"
-        print("\n[STEP 10] Verifying ChromaDB records...")
+        print("\n[STEP 10] Verifying pgvector records...")
 
-        stored_data = vector_store.get(
-            where={
-                "document_id": int(pdf_document.id)
-            },
-            include=["documents", "metadatas"]
-        )
-
-        stored_count = len(stored_data["ids"])
+        stored_count = count_document_embeddings(pdf_document.id)
 
         print("[VERIFY] Expected:", len(chunks))
         print("[VERIFY] Stored:", stored_count)
@@ -459,7 +565,7 @@ def create_pdf_embeddings(pdf_document):
             "total_characters": len(extracted_text),
             "total_chunks": len(chunks),
             "stored_chunks": stored_count,
-            "collection_name": COLLECTION_NAME,
+            "vector_table": f"{VECTOR_SCHEMA_NAME}.{VECTOR_TABLE_NAME}",
             "status": "success",
             "message": "PDF embeddings created and verified successfully"
         }

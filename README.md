@@ -4,7 +4,7 @@ AI PDF Chatbox is a full-stack application that lets a user upload a PDF, indexe
 
 - **Frontend:** React 19, Vite, Axios, and Lucide React
 - **Backend:** Django REST Framework
-- **Data:** MySQL for document metadata and ChromaDB for vector embeddings
+- **Data:** Supabase PostgreSQL for document metadata and pgvector embeddings
 - **AI:** Hugging Face `all-MiniLM-L6-v2` embeddings and a Groq chat model
 
 > The first PDF upload may take longer while the embedding model is downloaded and initialized.
@@ -13,7 +13,7 @@ AI PDF Chatbox is a full-stack application that lets a user upload a PDF, indexe
 
 1. The frontend sends a PDF and title to the Django API.
 2. Django stores the file and extracts its text with PyPDF.
-3. The text is split into overlapping chunks and stored with document metadata in ChromaDB.
+3. The text is split into overlapping chunks and stored with document metadata in Supabase PostgreSQL using pgvector.
 4. A question is matched against chunks belonging to the selected document.
 5. The relevant context is sent to Groq, which generates a document-based answer.
 
@@ -43,7 +43,7 @@ Component-specific setup and commands are documented in:
 - Windows PowerShell or a compatible terminal
 - Python 3.10+ (Python 3.11 is used by the checked-in virtual environment)
 - Node.js 20.19+ and npm
-- MySQL 8 or a compatible MySQL server
+- A PostgreSQL database (Supabase is supported)
 - A Groq API key
 - Internet access for initial model downloads
 
@@ -57,15 +57,14 @@ Run the backend and frontend in separate terminals.
 cd backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install django djangorestframework django-cors-headers django-cloudinary-storage mysqlclient python-dotenv
-pip install langchain langchain-community langchain-core langchain-huggingface langchain-chroma langchain-groq
-pip install pypdf chromadb sentence-transformers
+pip install -r requirements.txt
 ```
 
 Create `backend/.env`:
 
 ```env
 SECRET_KEY=generate_a_unique_secret_key
+DATABASE_URL=postgresql://your_user:your_password@your_host:5432/your_database
 GROQ_API_KEY=your_groq_api_key
 CLOUDINARY_CLOUD_NAME=your_cloud_name
 CLOUDINARY_API_KEY=your_api_key
@@ -78,10 +77,11 @@ Generate a secure `SECRET_KEY` locally with
 `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
 and set it in the backend environment (or Render's environment variables).
 
-Create the database in MySQL, update `backend/config/settings.py` with local database credentials, and run migrations:
+Configure `DATABASE_URL` for your PostgreSQL database and enable the `vector`
+extension in Supabase. Then run the Django migrations:
 
 ```sql
-CREATE DATABASE pdf_chatbox;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
 ```
 
 ```powershell

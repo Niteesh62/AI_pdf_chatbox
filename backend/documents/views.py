@@ -195,7 +195,7 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
             vector_store = get_vector_store()
 
             vector_store.delete(
-                where={
+                filter={
                     "document_id": int(instance.id)
                 }
             )

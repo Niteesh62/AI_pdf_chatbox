@@ -6,7 +6,10 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from .pdf_embedding_service import get_vector_store
+from .pdf_embedding_service import (
+    count_document_embeddings,
+    get_vector_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +56,7 @@ def ask_pdf_question(document_id, question):
 
     try:
 
-        stored_data = vector_store.get(
-            where={
-                "document_id": int(document_id)
-            }
-        )
-
-        total_chunks = len(
-            stored_data.get("ids", [])
-        )
+        total_chunks = count_document_embeddings(document_id)
 
         logger.info(
             "Document ID: %s | Total chunks: %s",

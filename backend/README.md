@@ -1,13 +1,13 @@
 # AI PDF Chatbox — Backend
 
-The backend is a Django REST Framework application that stores PDF metadata, extracts document text, creates embeddings in ChromaDB, and generates answers through Groq.
+The backend is a Django REST Framework application that stores PDF metadata in PostgreSQL, extracts document text, stores embeddings in pgvector, and generates answers through Groq.
 
 ## Technology
 
 - Django 5.2 and Django REST Framework
-- MySQL for Django records
+- Supabase PostgreSQL for Django records and vector embeddings
 - LangChain for PDF loading, chunking, retrieval, and prompts
-- ChromaDB for persistent vector storage
+- pgvector for persistent vector storage
 - Hugging Face `sentence-transformers/all-MiniLM-L6-v2` embeddings
 - Groq `openai/gpt-oss-20b` chat model
 - PyPDF for text extraction
@@ -30,13 +30,12 @@ backend/
 └── README.md
 ```
 
-Runtime-generated folders such as `media/`, `vectorstore/`, `venv/`, and `db.sqlite3` are excluded from source control.
+Runtime-generated folders such as `media/`, `venv/`, and `db.sqlite3` are excluded from source control.
 
 ## Prerequisites
 
 - Python 3.10 or newer
-- MySQL 8 or compatible server
-- MySQL build libraries required by `mysqlclient`
+- A PostgreSQL database with the pgvector extension enabled
 - A Groq API key
 - Internet access on the first embedding-model download
 
@@ -60,6 +59,7 @@ Create `backend/.env`:
 
 ```env
 SECRET_KEY=generate_a_unique_secret_key
+DATABASE_URL=postgresql://your_user:your_password@your_host:5432/your_database
 DEBUG=True
 SECURE_SSL_REDIRECT=False
 GROQ_API_KEY=your_groq_api_key
@@ -105,13 +105,13 @@ embedding/vector-store failures. When the browser receives no HTTP response,
 check the API URL, backend availability, HTTPS configuration, and whether the
 frontend origin is included in `CORS_ALLOWED_ORIGINS`.
 
-Create the MySQL database:
+Configure `DATABASE_URL` for your PostgreSQL database and enable pgvector in
+Supabase. The embedding service creates the `public.pdf_document_embeddings`
+table on first use; the database role must be allowed to create the table and
+the vector extension must already be enabled or creatable by that role.
 
-```sql
-CREATE DATABASE pdf_chatbox CHARACTER SET utf8mb4;
-```
-
-Review `config/settings.py` and configure the MySQL `NAME`, `USER`, `PASSWORD`, `HOST`, and `PORT` values for the local environment. Move real credentials out of source code before deployment.
+Existing local ChromaDB vectors are not migrated automatically. Reprocess the
+PDFs to populate pgvector.
 
 Apply migrations:
 
@@ -171,7 +171,8 @@ curl -X POST "http://127.0.0.1:8000/api/chat/" `
 - PDF text extraction temporarily downloads a copy for processing; the stored
   original remains in Cloudinary.
 - PDF text is split into chunks of 1,000 characters with 200-character overlap.
-- ChromaDB data is stored under `backend/vectorstore/`.
+- Embeddings are stored in the `public.pdf_document_embeddings` PostgreSQL
+  table, so they persist with the Supabase database.
 - Retrieval searches the five most relevant chunks filtered by `document_id`.
 - The chat endpoint returns an error for missing fields or unknown document IDs.
 - Embedding jobs run in a single in-process worker. A process restart can stop
@@ -193,7 +194,7 @@ python manage.py check
 ## Troubleshooting
 
 - **Missing API key:** Add `GROQ_API_KEY` to `backend/.env`, then restart Django.
-- **MySQL connection failure:** Verify MySQL is running and the credentials and database name in `config/settings.py` are correct.
+- **PostgreSQL/pgvector failure:** Verify `DATABASE_URL`, confirm the Supabase `vector` extension is enabled, and check that the database role can access the `public` schema.
 - **PDF upload failure:** Confirm the file is a PDF and is no larger than 10 MB.
 - **No embeddings found:** Upload/process the PDF again and inspect the Django terminal for ingestion errors.
 - **CORS error:** The backend allows `http://localhost:5173` in development.
@@ -206,5 +207,5 @@ python manage.py check
 - Restrict CORS and configure HTTPS and upload storage.
 - Keep database credentials, Cloudinary credentials, and the Groq key outside
   source control.
-- Use persistent storage for MySQL, uploaded PDFs, and ChromaDB.
+- Use Supabase PostgreSQL with pgvector for persistent records and embeddings, and Cloudinary for uploaded PDFs.
 - Add authentication and authorization before exposing document APIs.
