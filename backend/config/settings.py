@@ -98,6 +98,10 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+VERCEL_FRONTEND_ORIGIN = "https://ai-pdf-chatbox.vercel.app"
+if VERCEL_FRONTEND_ORIGIN not in CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS.append(VERCEL_FRONTEND_ORIGIN)
+
 CSRF_TRUSTED_ORIGINS = [
     origin.strip().rstrip("/")
     for origin in get_env(

@@ -96,7 +96,8 @@ values.
 
 Set `CORS_ALLOWED_ORIGINS` to a comma-separated list when allowing additional
 frontend origins. If it is unset, `http://localhost:5173` and
-`http://127.0.0.1:5173` are allowed for development.
+`http://127.0.0.1:5173` are allowed for development. The deployed frontend
+origin `https://ai-pdf-chatbox.vercel.app` is also allowed.
 
 Upload failures return a JSON `stage`, `code`, and `details` so you can
 distinguish Cloudinary storage failures from database, PDF parsing, and
