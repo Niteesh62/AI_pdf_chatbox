@@ -287,9 +287,6 @@ def create_pdf_embeddings(pdf_document):
         print("[TEXT] Empty:", not extracted_text.strip())
         print("[TEXT] Contains NULL:", "\x00" in extracted_text)
 
-        print("[TEXT] Preview:")
-        print(extracted_text[:300])
-
         if not extracted_text.strip():
 
             raise ValueError(
@@ -356,9 +353,6 @@ def create_pdf_embeddings(pdf_document):
 
         if not chunks:
             raise ValueError("All extracted chunks are empty.")
-
-        print("[CHUNK] First chunk preview:")
-        print(chunks[0].page_content[:300])
 
         # ------------------------------------------
         # STEP 6: ADD METADATA

@@ -15,10 +15,9 @@ from .models import PDFDocument
 from .serializers import PDFDocumentSerializer, PDFStorageError
 
 from .services.pdf_embedding_service import (
-    PDFIngestionError,
-    create_pdf_embeddings,
     get_vector_store
 )
+from .services.pdf_embedding_jobs import enqueue_pdf_embedding
 
 from .services.pdf_chat_service import ask_pdf_question
 
@@ -58,16 +57,6 @@ def _upload_failure(stage, code, message, error):
         },
         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
     )
-
-
-def _pdf_ingestion_error_code(stage):
-    if stage.startswith("cloudinary"):
-        return "CLOUDINARY_DOWNLOAD_FAILED"
-    if stage.startswith("database"):
-        return "PDF_DATABASE_UPDATE_FAILED"
-    if "embedding" in stage or "vector_store" in stage:
-        return "PDF_EMBEDDING_FAILED"
-    return "PDF_PROCESSING_FAILED"
 
 
 class HealthCheckView(APIView):
@@ -121,7 +110,7 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
     parser_classes = [MultiPartParser, FormParser]
 
     # ===============================================
-    # UPLOAD PDF + CREATE EMBEDDINGS
+    # UPLOAD PDF + QUEUE EMBEDDING JOB
     # ===============================================
 
     def create(self, request, *args, **kwargs):
@@ -156,50 +145,44 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
         )
 
         try:
-
-            result = create_pdf_embeddings(pdf_document)
-
-            logger.info(
-                "PDF embeddings created | ID: %s",
-                pdf_document.id
+            enqueue_pdf_embedding(pdf_document.id)
+        except RuntimeError as error:
+            print(
+                f"[EMBEDDING JOB] document_id={pdf_document.id} "
+                "status=failed stage=queue",
+                flush=True,
             )
-
-            return Response(
-                {
-                    "message": "PDF uploaded and embeddings created successfully",
-                    "status": "completed",
-                    "document": PDFDocumentSerializer(
-                        pdf_document
-                    ).data,
-                    "embedding_details": result
-                },
-                status=status.HTTP_201_CREATED
-            )
-
-        except PDFIngestionError as error:
             logger.exception(
-                "PDF ingestion failed at stage %s",
-                error.stage,
+                "Could not queue PDF embedding job | document_id=%s",
+                pdf_document.id,
             )
-
             response = _upload_failure(
-                error.stage,
-                _pdf_ingestion_error_code(error.stage),
-                "The PDF was stored, but processing or embedding creation failed.",
-                error.cause,
-            )
-            response.data["document_id"] = pdf_document.id
-            return response
-        except Exception as error:
-            logger.exception("Unexpected PDF ingestion failure")
-            response = _upload_failure(
-                "pdf_ingestion",
-                "PDF_INGESTION_FAILED",
-                "The PDF was stored, but processing or embedding creation failed.",
+                "embedding_queue",
+                "PDF_EMBEDDING_QUEUE_FAILED",
+                "The PDF was stored, but its embedding job could not be queued.",
                 error,
             )
             response.data["document_id"] = pdf_document.id
             return response
+
+        print(
+            f"[EMBEDDING JOB] document_id={pdf_document.id} status=queued",
+            flush=True,
+        )
+        logger.info(
+            "PDF upload accepted | document_id=%s | embedding_status=queued",
+            pdf_document.id,
+        )
+
+        return Response(
+            {
+                "message": "PDF uploaded. Embedding is queued in the background.",
+                "status": "processing",
+                "embedding_status": "queued",
+                "document": PDFDocumentSerializer(pdf_document).data,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     # ===============================================
     # DELETE PDF + EMBEDDINGS

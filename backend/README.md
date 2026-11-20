@@ -136,7 +136,7 @@ The API is available at `http://127.0.0.1:8000/api/`.
 | `GET` | `/api/health/` | Check whether the API server is responding |
 | `GET` | `/api/ready/` | Check whether the API and database are ready |
 | `GET` | `/api/pdfs/` | List uploaded PDFs |
-| `POST` | `/api/pdfs/` | Upload a PDF and build embeddings |
+| `POST` | `/api/pdfs/` | Store a PDF and queue background embedding |
 | `GET` | `/api/pdfs/{id}/` | Retrieve one PDF |
 | `PUT`/`PATCH` | `/api/pdfs/{id}/` | Update PDF fields |
 | `DELETE` | `/api/pdfs/{id}/` | Remove the PDF and matching vectors |
@@ -152,7 +152,9 @@ curl -X POST "http://127.0.0.1:8000/api/pdfs/" `
   -F "pdf_file=@C:/path/to/document.pdf"
 ```
 
-Use the returned `document.id` for chat requests.
+The upload returns `202 Accepted` with the stored `document` while embeddings
+run in the background. Use the returned `document.id` for chat requests after
+the backend log reports `status=completed`.
 
 ### Chat Example
 
@@ -172,6 +174,9 @@ curl -X POST "http://127.0.0.1:8000/api/chat/" `
 - ChromaDB data is stored under `backend/vectorstore/`.
 - Retrieval searches the five most relevant chunks filtered by `document_id`.
 - The chat endpoint returns an error for missing fields or unknown document IDs.
+- Embedding jobs run in a single in-process worker. A process restart can stop
+  queued or running work; use a durable task queue if restart-safe processing is
+  required.
 
 Scanned PDFs and image-only documents require OCR before text can be indexed; OCR is not implemented by this backend.
 
