@@ -12,6 +12,8 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from config.runtime_diagnostics import log_runtime_stage
+
 from .models import PDFDocument
 from .serializers import PDFDocumentSerializer, PDFStorageError
 
@@ -68,6 +70,7 @@ def _upload_failure(stage, code, message, error):
 class HealthCheckView(APIView):
 
     def get(self, request):
+        logger.info("health_check | status=200")
         return Response(
             {"status": "ok"},
             status=status.HTTP_200_OK,
@@ -158,9 +161,8 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
             )
 
         logger.info(
-            "PDF uploaded | document_id=%s | title=%s",
+            "PDF uploaded | document_id=%s",
             pdf_document.id,
-            pdf_document.title,
         )
 
         # Queue the embedding job
@@ -397,10 +399,15 @@ class PDFChatView(APIView):
         )
 
         try:
-            answer = ask_pdf_question(
+            with log_runtime_stage(
+                logger,
+                "chat_request",
                 document_id=pdf_document.id,
-                question=question,
-            )
+            ):
+                answer = ask_pdf_question(
+                    document_id=pdf_document.id,
+                    question=question,
+                )
 
             return Response(
                 {

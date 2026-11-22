@@ -19,6 +19,7 @@ from typing import Any
 
 from django.conf import settings
 from django.db import connection, transaction
+from config.runtime_diagnostics import log_runtime_stage
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -348,9 +349,8 @@ def create_pdf_embeddings(pdf_document):
     started = time.monotonic()
 
     logger.info(
-        "PDF ingestion started | document_id=%s | title=%s | table=%s.%s",
+        "PDF ingestion started | document_id=%s | table=%s.%s",
         document_id,
-        title,
         VECTOR_SCHEMA_NAME,
         VECTOR_TABLE_NAME,
     )
@@ -367,21 +367,28 @@ def create_pdf_embeddings(pdf_document):
 
         with tempfile.TemporaryDirectory(prefix="pdf-ingestion-") as temp_dir:
             pdf_path = os.path.join(temp_dir, "document.pdf")
-            with pdf_document.pdf_file.open("rb") as stored_file:
-                with open(pdf_path, "wb") as local_file:
-                    shutil.copyfileobj(stored_file, local_file)
+            with log_runtime_stage(
+                logger,
+                "cloudinary_download",
+                document_id=document_id,
+            ):
+                with pdf_document.pdf_file.open("rb") as stored_file:
+                    with open(pdf_path, "wb") as local_file:
+                        shutil.copyfileobj(stored_file, local_file)
 
-            file_size = os.path.getsize(pdf_path)
-            if file_size < 5:
-                raise ValueError(f"Downloaded PDF is empty or too small ({file_size} bytes).")
+                file_size = os.path.getsize(pdf_path)
+                if file_size < 5:
+                    raise ValueError(
+                        f"Downloaded PDF is empty or too small ({file_size} bytes)."
+                    )
 
-            with open(pdf_path, "rb") as check_file:
-                header = check_file.read(5)
-            if header != b"%PDF-":
-                raise ValueError(
-                    f"Downloaded file is not a valid PDF. Header={header!r}. "
-                    "Check Cloudinary resource type and stored file URL."
-                )
+                with open(pdf_path, "rb") as check_file:
+                    header = check_file.read(5)
+                if header != b"%PDF-":
+                    raise ValueError(
+                        f"Downloaded file is not a valid PDF. Header={header!r}. "
+                        "Check Cloudinary resource type and stored file URL."
+                    )
 
             logger.info(
                 "PDF downloaded to temporary storage | document_id=%s | bytes=%s",
@@ -391,7 +398,12 @@ def create_pdf_embeddings(pdf_document):
 
             # 2. Parse PDF.
             stage = "pdf_parse"
-            pages = PyPDFLoader(pdf_path).load()
+            with log_runtime_stage(
+                logger,
+                "pdf_extraction",
+                document_id=document_id,
+            ):
+                pages = PyPDFLoader(pdf_path).load()
             if not pages:
                 raise ValueError("PDF parser returned no pages.")
             logger.info(
@@ -402,18 +414,24 @@ def create_pdf_embeddings(pdf_document):
 
             # 3. Clean extracted page text.
             stage = "text_extraction"
-            for page_number, page in enumerate(pages, start=1):
-                page.page_content = clean_pdf_text(page.page_content)
-                logger.debug(
-                    "PDF page extracted | document_id=%s | page=%s | chars=%s",
-                    document_id,
-                    page_number,
-                    len(page.page_content),
-                )
+            with log_runtime_stage(
+                logger,
+                "text_extraction",
+                document_id=document_id,
+                pages=len(pages),
+            ):
+                for page_number, page in enumerate(pages, start=1):
+                    page.page_content = clean_pdf_text(page.page_content)
+                    logger.debug(
+                        "PDF page extracted | document_id=%s | page=%s | chars=%s",
+                        document_id,
+                        page_number,
+                        len(page.page_content),
+                    )
 
-            extracted_text = clean_pdf_text(
-                "\n\n".join(page.page_content for page in pages)
-            )
+                extracted_text = clean_pdf_text(
+                    "\n\n".join(page.page_content for page in pages)
+                )
             if not extracted_text:
                 raise ValueError(
                     "No extractable text was found. This may be a scanned/image-only PDF; "
@@ -422,8 +440,14 @@ def create_pdf_embeddings(pdf_document):
 
             # 4. Save extracted text in the Django document record.
             stage = "database_update"
-            pdf_document.extracted_text = extracted_text
-            pdf_document.save(update_fields=["extracted_text"])
+            with log_runtime_stage(
+                logger,
+                "save_extracted_text",
+                document_id=document_id,
+                characters=len(extracted_text),
+            ):
+                pdf_document.extracted_text = extracted_text
+                pdf_document.save(update_fields=["extracted_text"])
             logger.info(
                 "Extracted PDF text saved | document_id=%s | characters=%s",
                 document_id,
@@ -432,31 +456,36 @@ def create_pdf_embeddings(pdf_document):
 
             # 5. Split into chunks.
             stage = "chunking"
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                length_function=len,
-            )
-            chunks = splitter.split_documents(pages)
-
-            valid_chunks = []
-            for chunk in chunks:
-                chunk.page_content = clean_pdf_text(chunk.page_content)
-                if chunk.page_content:
-                    valid_chunks.append(chunk)
-
-            if not valid_chunks:
-                raise ValueError("Text splitter produced no non-empty chunks.")
-
-            for index, chunk in enumerate(valid_chunks):
-                chunk.metadata = dict(chunk.metadata or {})
-                chunk.metadata.update(
-                    {
-                        "document_id": int(document_id),
-                        "document_title": str(title),
-                        "chunk_index": index,
-                    }
+            with log_runtime_stage(
+                logger,
+                "chunk_creation",
+                document_id=document_id,
+            ):
+                splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                    length_function=len,
                 )
+                chunks = splitter.split_documents(pages)
+
+                valid_chunks = []
+                for chunk in chunks:
+                    chunk.page_content = clean_pdf_text(chunk.page_content)
+                    if chunk.page_content:
+                        valid_chunks.append(chunk)
+
+                if not valid_chunks:
+                    raise ValueError("Text splitter produced no non-empty chunks.")
+
+                for index, chunk in enumerate(valid_chunks):
+                    chunk.metadata = dict(chunk.metadata or {})
+                    chunk.metadata.update(
+                        {
+                            "document_id": int(document_id),
+                            "document_title": str(title),
+                            "chunk_index": index,
+                        }
+                    )
 
             logger.info(
                 "PDF chunking completed | document_id=%s | chunks=%s | chunk_size=1000 | overlap=200",
@@ -466,8 +495,20 @@ def create_pdf_embeddings(pdf_document):
 
         # 6. Load embedding model and generate vectors in manageable batches.
         stage = "embedding_model"
-        embeddings, dimension = get_embedding_model()
-        ensure_vector_table(dimension)
+        with log_runtime_stage(
+            logger,
+            "embedding_model_load",
+            document_id=document_id,
+            model=EMBEDDING_MODEL_NAME,
+        ):
+            embeddings, dimension = get_embedding_model()
+
+        with log_runtime_stage(
+            logger,
+            "vector_table_check",
+            document_id=document_id,
+        ):
+            ensure_vector_table(dimension)
 
         stage = "embedding_generation"
         texts = [chunk.page_content for chunk in valid_chunks]
@@ -487,7 +528,15 @@ def create_pdf_embeddings(pdf_document):
             start=1,
         ):
             batch_texts = texts[offset : offset + EMBEDDING_BATCH_SIZE]
-            batch_vectors = embeddings.embed_documents(batch_texts)
+            with log_runtime_stage(
+                logger,
+                "embedding_batch",
+                document_id=document_id,
+                batch=batch_number,
+                total_batches=total_batches,
+                chunks=len(batch_texts),
+            ):
+                batch_vectors = embeddings.embed_documents(batch_texts)
             if len(batch_vectors) != len(batch_texts):
                 raise RuntimeError(
                     f"Embedding batch {batch_number} returned {len(batch_vectors)} vectors "
@@ -510,15 +559,26 @@ def create_pdf_embeddings(pdf_document):
 
         # 7. Atomically replace and verify records in Supabase.
         stage = "pgvector_storage"
-        stored_count = replace_document_embeddings(
+        with log_runtime_stage(
+            logger,
+            "supabase_embedding_insert",
             document_id=document_id,
-            chunks=valid_chunks,
-            vectors=vectors,
-        )
+            chunks=len(valid_chunks),
+        ):
+            stored_count = replace_document_embeddings(
+                document_id=document_id,
+                chunks=valid_chunks,
+                vectors=vectors,
+            )
 
         # 8. Final independent count check.
         stage = "embedding_verification"
-        verified_count = count_document_embeddings(document_id)
+        with log_runtime_stage(
+            logger,
+            "embedding_verification",
+            document_id=document_id,
+        ):
+            verified_count = count_document_embeddings(document_id)
         if verified_count != len(valid_chunks):
             raise RuntimeError(
                 f"Final verification mismatch: expected {len(valid_chunks)}, "

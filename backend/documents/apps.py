@@ -1,4 +1,8 @@
 from django.apps import AppConfig
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentsConfig(AppConfig):
@@ -9,3 +13,5 @@ class DocumentsConfig(AppConfig):
 
     def ready(self):
         from . import signals
+
+        logger.info("django_app_initialized | app=%s", self.name)

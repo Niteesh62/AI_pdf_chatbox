@@ -50,27 +50,6 @@ if not DEBUG and (
 # 2. ENVIRONMENT VARIABLE CHECK
 # ==================================================
 
-REQUIRED_ENVIRONMENT_VARIABLES = [
-    "SECRET_KEY",
-    "GROQ_API_KEY",
-    "CLOUDINARY_CLOUD_NAME",
-    "CLOUDINARY_API_KEY",
-    "CLOUDINARY_API_SECRET",
-]
-
-print("\n========== ENVIRONMENT CHECK ==========")
-
-for variable in REQUIRED_ENVIRONMENT_VARIABLES:
-    value = get_env(variable)
-    print(
-        f"[CONFIG] {variable}: "
-        f"{'CONFIGURED' if value else 'MISSING'}",
-        flush=True
-    )
-
-print("=======================================\n")
-
-
 # ==================================================
 # 3. ALLOWED HOSTS
 # ==================================================
@@ -144,6 +123,8 @@ INSTALLED_APPS = [
 # ==================================================
 
 MIDDLEWARE = [
+
+    "config.middleware.RequestDiagnosticsMiddleware",
 
     "corsheaders.middleware.CorsMiddleware",
 
@@ -364,9 +345,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 GROQ_API_KEY = get_env("GROQ_API_KEY")
 
-if not GROQ_API_KEY:
-    print("[WARNING] GROQ_API_KEY is missing.")
-
 
 # ==================================================
 # 17. RENDER HTTPS CONFIGURATION
@@ -395,6 +373,7 @@ LOGGING = {
 
     "formatters": {
         "verbose": {
+            "()": "config.runtime_diagnostics.RedactingFormatter",
             "format": (
                 "[{levelname}] "
                 "{asctime} "
@@ -426,29 +405,3 @@ LOGGING = {
     },
 
 }
-
-
-# ==================================================
-# 19. FINAL CONFIGURATION INFORMATION
-# ==================================================
-
-print("\n========== DJANGO SETTINGS LOADED ==========")
-
-print("[CONFIG] DEBUG:", DEBUG)
-
-print("[CONFIG] DATABASE:", "PostgreSQL" if DATABASE_URL else "SQLite")
-
-print("[CONFIG] Cloudinary Cloud:", CLOUDINARY_CLOUD_NAME)
-
-print(
-    "[CONFIG] Cloudinary API Key Last 4:",
-    CLOUDINARY_API_KEY[-4:]
-)
-
-print("[CONFIG] Cloudinary SDK initialized:", True)
-
-print("[CONFIG] Default Storage: Cloudinary Raw Media")
-
-print("[CONFIG] HTTPS Redirect:", SECURE_SSL_REDIRECT)
-
-print("========== SETTINGS READY ==========\n")

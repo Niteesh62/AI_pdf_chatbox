@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from django.db import close_old_connections, connections
 
+from config.runtime_diagnostics import log_runtime_stage
+
 from ..models import PDFDocument
 from .pdf_embedding_service import PDFIngestionError, create_pdf_embeddings
 
@@ -26,23 +28,28 @@ def run_pdf_embedding_job(document_id):
     stage = "load_document"
 
     logger.info(
-        "PDF embedding job started | document_id=%s",
+        "PDF embedding job started | document_id=%s | status=started",
         document_id,
     )
 
     try:
         pdf_document = PDFDocument.objects.get(pk=document_id)
         logger.info(
-            "PDF embedding job loaded document | document_id=%s | title=%s",
+            "PDF embedding job loaded document | document_id=%s",
             document_id,
-            pdf_document.title,
         )
 
         stage = "ingestion"
-        result = create_pdf_embeddings(pdf_document)
+        with log_runtime_stage(
+            logger,
+            "pdf_processing",
+            document_id=document_id,
+        ):
+            result = create_pdf_embeddings(pdf_document)
 
         logger.info(
-            "PDF embedding job completed | document_id=%s | status=%s | "
+            "PDF embedding job completed | document_id=%s | status=completed | "
+            "ingestion_status=%s | "
             "pages=%s | chunks=%s | stored_chunks=%s",
             document_id,
             result.get("status"),
@@ -54,7 +61,8 @@ def run_pdf_embedding_job(document_id):
 
     except PDFDocument.DoesNotExist:
         logger.exception(
-            "PDF embedding job failed: document does not exist | document_id=%s | stage=%s",
+            "PDF embedding job failed | status=failed | reason=document_missing "
+            "| document_id=%s | stage=%s",
             document_id,
             stage,
         )
@@ -62,7 +70,7 @@ def run_pdf_embedding_job(document_id):
 
     except PDFIngestionError as exc:
         logger.exception(
-            "PDF embedding job failed | document_id=%s | stage=%s | "
+            "PDF embedding job failed | status=failed | document_id=%s | stage=%s | "
             "cause_type=%s | cause=%s",
             document_id,
             exc.stage,
@@ -73,7 +81,8 @@ def run_pdf_embedding_job(document_id):
 
     except Exception:
         logger.exception(
-            "PDF embedding job failed unexpectedly | document_id=%s | stage=%s",
+            "PDF embedding job failed unexpectedly | status=failed "
+            "| document_id=%s | stage=%s",
             document_id,
             stage,
         )

@@ -84,15 +84,72 @@ Django's HTTP development server does not redirect API requests to HTTPS. In
 Render, use `DEBUG=False` and `SECURE_SSL_REDIRECT=True` (or leave the redirect
 setting unset, since it defaults to enabled when `DEBUG=False`).
 
+## Render Web Service
+
+Set the Render service's **Root Directory** to `backend` and configure:
+
+| Setting | Value |
+|---|---|
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `gunicorn config.wsgi:application --config gunicorn.conf.py` |
+| `DEBUG` environment variable | `False` |
+| `WEB_CONCURRENCY` environment variable | `1` |
+| `GUNICORN_TIMEOUT` environment variable | `180` |
+
+Render supplies `PORT` automatically. Do not hard-code it in the dashboard;
+Gunicorn binds to `0.0.0.0:$PORT` (falling back to port `10000` only for local
+development). Startup logs identify the selected host, port, and whether the
+port came from the environment or the local default.
+
+Gunicorn and Django diagnostics are written to standard output/error, which
+Render captures in the service logs. They include startup and worker lifecycle
+events, URL and database checks, request status/duration, and process RSS and
+CPU measurements around requests and PDF/chat processing. RSS is read from
+`/proc/self/status` and is reported as unavailable on platforms without that
+file. Log output redacts configured secrets and common credential-shaped
+values; request bodies and query strings are not logged.
+
+To verify Django's port binding locally from PowerShell on Windows:
+
+```powershell
+cd backend
+$env:PORT = "10000"
+python manage.py runserver "0.0.0.0:$env:PORT"
+```
+
+In another terminal, confirm that Django responds on the configured port:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:10000/api/health/
+```
+
+Gunicorn is not supported on native Windows. The Render production start
+command above is the Gunicorn port-binding test; run it in Render or a Linux
+environment (including WSL) to verify Gunicorn hooks.
+
+The logs should show `gunicorn_starting`, `gunicorn_master_ready`,
+`django_initialization_succeeded`, `django_root_urlconf_configured`, and
+`gunicorn_worker_initialized`. If
+`gunicorn_starting` is absent, check the Render start command and build logs.
+If it appears without `gunicorn_master_ready`, inspect the Gunicorn bind and
+port errors. If the master is ready but Django startup or worker initialization
+fails, inspect the corresponding traceback. URL and view import errors appear
+with the first failing request's 5xx log and traceback; routes are not eagerly
+imported during startup to avoid loading PDF/ML dependencies solely for a
+diagnostic check. Render's
+memory metrics and OOM
+events are authoritative for platform kills; a process killed by the platform
+cannot log its own shutdown.
+
 Create a Cloudinary account and set its cloud name, API key, and API secret
 above. PDF uploads use Cloudinary raw storage; Django reads them from Cloudinary
 when processing and downloading. Existing PDFs in local `media/` are not moved
 automatically.
 
 At startup, the backend reports whether `DATABASE_URL`, `SECRET_KEY`,
-`GROQ_API_KEY`, and the three Cloudinary settings are configured, then checks
-the database and Cloudinary API connection. These logs never print credential
-values.
+`GROQ_API_KEY`, and the three Cloudinary settings are configured without
+printing their values, then checks the database connection. ASGI startup also
+checks the Cloudinary API connection.
 
 Set `CORS_ALLOWED_ORIGINS` to a comma-separated list when allowing additional
 frontend origins. If it is unset, `http://localhost:5173` and
@@ -178,6 +235,9 @@ curl -X POST "http://127.0.0.1:8000/api/chat/" `
 - Embedding jobs run in a single in-process worker. A process restart can stop
   queued or running work; use a durable task queue if restart-safe processing is
   required.
+- Runtime logs measure memory and CPU around the request and processing stages.
+  Use the last `runtime_stage_started` entry plus Render's memory graph to
+  identify a stage interrupted by an OOM restart.
 
 Scanned PDFs and image-only documents require OCR before text can be indexed; OCR is not implemented by this backend.
 
