@@ -7,18 +7,14 @@ For more information on this file, see
 https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
 """
 
-import os
 import logging
+import os
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
-from config.runtime_diagnostics import RedactingFormatter
+from config.logging_config import configure_logging
 
-_startup_handler = logging.StreamHandler()
-_startup_handler.setFormatter(
-    RedactingFormatter("[{levelname}] {asctime} {name}: {message}", style="{")
-)
-logging.basicConfig(level=logging.INFO, handlers=[_startup_handler])
+configure_logging()
 logger = logging.getLogger(__name__)
 logger.info("django_startup_begin | interface=ASGI | port_configured=%s", bool(os.environ.get("PORT")))
 

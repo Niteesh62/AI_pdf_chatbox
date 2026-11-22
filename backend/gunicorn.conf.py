@@ -30,23 +30,26 @@ errorlog = "-"
 capture_output = True
 
 
-def on_starting(_server):
+def on_starting(server):
     logger.info(
-        "gunicorn_starting | bind_host=%s | bind_port=%s | port_source=%s "
-        "| workers=%s | timeout_seconds=%s",
-        host,
-        port,
+        "gunicorn_starting | configured_bind=%s | effective_bind=%s "
+        "| port_source=%s | workers=%s | timeout_seconds=%s",
+        bind,
+        server.cfg.bind,
         port_source,
-        workers,
-        timeout,
+        server.cfg.workers,
+        server.cfg.timeout,
     )
 
 
 def when_ready(server):
     logger.info(
-        "gunicorn_master_ready | bind=%s | listening_sockets=%s",
-        bind,
+        "gunicorn_master_ready | effective_bind=%s | listening_sockets=%s "
+        "| workers=%s | timeout_seconds=%s",
+        server.cfg.bind,
         len(server.LISTENERS),
+        server.cfg.workers,
+        server.cfg.timeout,
     )
 
 
@@ -72,14 +75,24 @@ def worker_int(worker):
 
 
 def worker_exit(_server, worker):
-    logger.warning("gunicorn_worker_exiting | pid=%s", worker.pid)
+    logger.info("gunicorn_worker_exiting | pid=%s", worker.pid)
 
 
 def child_exit(_server, worker):
-    logger.warning(
-        "gunicorn_worker_process_exited | pid=%s | exit_code=%s",
+    exit_code = getattr(worker, "exitcode", None)
+    if exit_code is None:
+        level, status = logging.WARNING, "unknown"
+    elif exit_code != 0:
+        level, status = logging.ERROR, "failed"
+    else:
+        level, status = logging.INFO, "clean"
+
+    logger.log(
+        level,
+        "gunicorn_worker_process_exited | pid=%s | exit_code=%s | status=%s",
         worker.pid,
-        getattr(worker, "exitcode", "unavailable"),
+        exit_code if exit_code is not None else "unavailable",
+        status,
     )
 
 

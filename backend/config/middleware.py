@@ -17,13 +17,22 @@ class RequestDiagnosticsMiddleware:
         cpu_started_at = time.process_time()
         rss_before_mb = process_rss_mb()
 
+        logger.info(
+            "http_request_started | method=%s | path=%s | pid=%s",
+            request.method,
+            request.path_info,
+            os.getpid(),
+        )
+
         try:
             response = self.get_response(request)
         except Exception:
             logger.exception(
-                "http_request_failed | method=%s | path=%s | elapsed_seconds=%.3f",
+                "http_request_failed | method=%s | path=%s | endpoint=%s "
+                "| elapsed_seconds=%.3f",
                 request.method,
                 request.path_info,
+                self._endpoint_name(request),
                 time.perf_counter() - started_at,
             )
             raise
@@ -52,12 +61,13 @@ class RequestDiagnosticsMiddleware:
 
         logger.log(
             log_level,
-            "http_request | method=%s | path=%s | status=%s | "
+            "http_request | method=%s | path=%s | endpoint=%s | status=%s | "
             "elapsed_seconds=%.3f | cpu_seconds=%.3f | "
             "process_cpu_percent=%.1f | rss_before_mb=%s | "
             "rss_after_mb=%s | rss_delta_mb=%s | pid=%s",
             request.method,
             request.path_info,
+            self._endpoint_name(request),
             status_code,
             elapsed_seconds,
             cpu_seconds,
@@ -68,3 +78,10 @@ class RequestDiagnosticsMiddleware:
             os.getpid(),
         )
         return response
+
+    @staticmethod
+    def _endpoint_name(request):
+        match = getattr(request, "resolver_match", None)
+        if match is None:
+            return "unresolved"
+        return match.view_name or match.route

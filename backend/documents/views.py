@@ -9,6 +9,7 @@ from django.http import FileResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -16,9 +17,6 @@ from config.runtime_diagnostics import log_runtime_stage
 
 from .models import PDFDocument
 from .serializers import PDFDocumentSerializer, PDFStorageError
-
-from .services.pdf_embedding_jobs import enqueue_pdf_embedding
-from .services.pdf_chat_service import ask_pdf_question
 
 
 logger = logging.getLogger(__name__)
@@ -68,9 +66,10 @@ def _upload_failure(stage, code, message, error):
 # ==================================================
 
 class HealthCheckView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request):
-        logger.info("health_check | status=200")
         return Response(
             {"status": "ok"},
             status=status.HTTP_200_OK,
@@ -167,6 +166,8 @@ class PDFDocumentViewSet(viewsets.ModelViewSet):
 
         # Queue the embedding job
         try:
+            from .services.pdf_embedding_jobs import enqueue_pdf_embedding
+
             enqueue_pdf_embedding(pdf_document.id)
 
         except Exception as error:
@@ -399,6 +400,8 @@ class PDFChatView(APIView):
         )
 
         try:
+            from .services.pdf_chat_service import ask_pdf_question
+
             with log_runtime_stage(
                 logger,
                 "chat_request",

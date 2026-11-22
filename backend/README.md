@@ -92,19 +92,32 @@ Set the Render service's **Root Directory** to `backend` and configure:
 |---|---|
 | Build Command | `pip install -r requirements.txt` |
 | Start Command | `gunicorn config.wsgi:application --config gunicorn.conf.py` |
+| Health Check Path | `/api/health/` |
 | `DEBUG` environment variable | `False` |
 | `WEB_CONCURRENCY` environment variable | `1` |
 | `GUNICORN_TIMEOUT` environment variable | `180` |
 
+Configure the health-check path in the Render service settings; there is no
+Render Blueprint file in this repository. `/api/health/` is a lightweight
+process check and does not query the database or call external APIs.
+`/api/ready/` checks PostgreSQL and should only be used when the health check
+is intended to require database readiness. Render accepts `2xx` or `3xx`
+responses to an HTTP health check within five seconds.
+
 Render supplies `PORT` automatically. Do not hard-code it in the dashboard;
 Gunicorn binds to `0.0.0.0:$PORT` (falling back to port `10000` only for local
 development). Startup logs identify the selected host, port, and whether the
-port came from the environment or the local default.
+port came from the environment or the local default. Gunicorn command-line
+options take precedence over values in `gunicorn.conf.py`; the startup logs
+include both the configured and effective bind plus effective worker and
+timeout settings.
 
 Gunicorn and Django diagnostics are written to standard output/error, which
 Render captures in the service logs. They include startup and worker lifecycle
-events, URL and database checks, request status/duration, and process RSS and
-CPU measurements around requests and PDF/chat processing. RSS is read from
+events, URL and database checks, HTTP method, path, resolved endpoint, status,
+duration, and process RSS and CPU measurements around requests and PDF/chat
+processing. The Django request middleware is the single access-log source; do
+not also enable Gunicorn access logging in the Render start command. RSS is read from
 `/proc/self/status` and is reported as unavailable on platforms without that
 file. Log output redacts configured secrets and common credential-shaped
 values; request bodies and query strings are not logged.

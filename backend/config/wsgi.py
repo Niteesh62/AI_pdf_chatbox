@@ -8,13 +8,10 @@ import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
-from config.runtime_diagnostics import RedactingFormatter, log_process_metrics
+from config.logging_config import configure_logging
+from config.runtime_diagnostics import log_process_metrics
 
-_startup_handler = logging.StreamHandler()
-_startup_handler.setFormatter(
-    RedactingFormatter("[{levelname}] {asctime} {name}: {message}", style="{")
-)
-logging.basicConfig(level=logging.INFO, handlers=[_startup_handler])
+configure_logging()
 logger = logging.getLogger(__name__)
 
 logger.info(

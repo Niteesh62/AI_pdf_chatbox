@@ -12,6 +12,8 @@ import cloudinary
 import dj_database_url
 from dotenv import load_dotenv
 
+from config.logging_config import LOGGING
+
 
 # ==================================================
 # 1. BASE CONFIGURATION
@@ -359,49 +361,3 @@ SECURE_SSL_REDIRECT = get_env(
     "SECURE_SSL_REDIRECT",
     str(not DEBUG),
 ).lower() == "true"
-
-
-# ==================================================
-# 18. LOGGING CONFIGURATION
-# ==================================================
-
-LOGGING = {
-
-    "version": 1,
-
-    "disable_existing_loggers": False,
-
-    "formatters": {
-        "verbose": {
-            "()": "config.runtime_diagnostics.RedactingFormatter",
-            "format": (
-                "[{levelname}] "
-                "{asctime} "
-                "{name}: "
-                "{message}"
-            ),
-            "style": "{",
-        },
-    },
-
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "verbose",
-        },
-    },
-
-    "root": {
-        "handlers": ["console"],
-        "level": "INFO",
-    },
-
-    "loggers": {
-        "django": {
-            "handlers": ["console"],
-            "level": "INFO",
-            "propagate": False,
-        },
-    },
-
-}
