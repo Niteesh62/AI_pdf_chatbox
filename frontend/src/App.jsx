@@ -1,9 +1,10 @@
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import Sidebar from "./Components/Sidebar/Sidebar.jsx";
 import Pdf_uploader from "./Components/Pdf_uploader/Pdf_uplaoder.jsx";
 import ChatWindow from "./Components/ChatWindow/ChatWindow.jsx";
+import API from "./api/axiosInstance.js";
 
 import "./App.css";
 
@@ -21,6 +22,33 @@ const createChat = () => ({
 });
 
 function App() {
+  const [apiStatus, setApiStatus] = useState("checking");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkApiStatus = async () => {
+      try {
+        const response = await API.get("health/", { timeout: 8000 });
+        if (isMounted) {
+          setApiStatus(response.data?.status === "ok" ? "online" : "offline");
+        }
+      } catch {
+        if (isMounted) {
+          setApiStatus("offline");
+        }
+      }
+    };
+
+    checkApiStatus();
+    const intervalId = window.setInterval(checkApiStatus, 30000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
   // Current uploaded PDF
   const [document, setDocument] = useState(null);
 
@@ -156,6 +184,18 @@ function App() {
 
   return (
     <div className="app-container">
+      <div
+        className={`api-status api-status--${apiStatus}`}
+        role="status"
+        aria-live="polite"
+      >
+        <span className="api-status-dot" aria-hidden="true" />
+        {apiStatus === "checking"
+          ? "Checking server"
+          : apiStatus === "online"
+            ? "Server online"
+            : "Server offline"}
+      </div>
 
       <Sidebar
         document={document}

@@ -219,10 +219,6 @@ const ChatWindow = ({
           </p>
         </div>
 
-        <div className="online-status">
-          <span></span>
-          AI Ready
-        </div>
       </div>
 
       {/* CHAT MESSAGES */}
