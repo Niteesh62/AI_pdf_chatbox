@@ -13,31 +13,26 @@ import os
 import re
 import shutil
 import tempfile
-import threading
 import time
 from typing import Any
 
-from django.conf import settings
 from django.db import connection, transaction
 from config.runtime_diagnostics import log_runtime_stage
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from .llm_embedding import (
+    EMBEDDING_MODEL_NAME,
+    EXPECTED_VECTOR_SIZE,
+    encode_texts,
+    get_embedding_model,
+)
 
 logger = logging.getLogger(__name__)
 
 VECTOR_SCHEMA_NAME = "public"
 VECTOR_TABLE_NAME = "pdf_document_embeddings"
-EMBEDDING_MODEL_NAME = os.getenv(
-    "HF_EMBEDDING_MODEL",
-    "sentence-transformers/all-MiniLM-L6-v2",
-)
-EXPECTED_VECTOR_SIZE = 384
-EMBEDDING_BATCH_SIZE = 64
-
-_embedding_model = None
-_embedding_dimension = None
-_embedding_lock = threading.Lock()
+EMBEDDING_BATCH_SIZE = 4
 
 
 class PDFIngestionError(Exception):
@@ -75,48 +70,6 @@ def clean_pdf_text(text: str) -> str:
             removed,
         )
     return cleaned
-
-
-def get_embedding_model():
-    """Load the Hugging Face model once per worker process."""
-    global _embedding_model, _embedding_dimension
-
-    if _embedding_model is not None:
-        return _embedding_model, _embedding_dimension
-
-    with _embedding_lock:
-        if _embedding_model is not None:
-            return _embedding_model, _embedding_dimension
-
-        started = time.monotonic()
-        logger.info("Loading embedding model | model=%s | device=cpu", EMBEDDING_MODEL_NAME)
-        try:
-            model = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL_NAME,
-                model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True},
-            )
-            probe = model.embed_query("PDF embedding model dimension check")
-            dimension = len(probe)
-
-            if dimension != EXPECTED_VECTOR_SIZE:
-                raise ValueError(
-                    f"Embedding model returned {dimension} dimensions; "
-                    f"the configured Supabase vector column expects {EXPECTED_VECTOR_SIZE}."
-                )
-
-            _embedding_model = model
-            _embedding_dimension = dimension
-            logger.info(
-                "Embedding model loaded | model=%s | dimensions=%s | elapsed_seconds=%.2f",
-                EMBEDDING_MODEL_NAME,
-                dimension,
-                time.monotonic() - started,
-            )
-            return _embedding_model, _embedding_dimension
-        except Exception:
-            logger.exception("Embedding model initialization failed | model=%s", EMBEDDING_MODEL_NAME)
-            raise
 
 
 def _quoted_table_name() -> str:
@@ -501,7 +454,7 @@ def create_pdf_embeddings(pdf_document):
             document_id=document_id,
             model=EMBEDDING_MODEL_NAME,
         ):
-            embeddings, dimension = get_embedding_model()
+            _, dimension = get_embedding_model()
 
         with log_runtime_stage(
             logger,
@@ -528,26 +481,12 @@ def create_pdf_embeddings(pdf_document):
             start=1,
         ):
             batch_texts = texts[offset : offset + EMBEDDING_BATCH_SIZE]
-            with log_runtime_stage(
-                logger,
-                "embedding_batch",
+            batch_vectors = encode_texts(
+                batch_texts,
+                batch_size=EMBEDDING_BATCH_SIZE,
+                stage="embedding_batch",
                 document_id=document_id,
-                batch=batch_number,
-                total_batches=total_batches,
-                chunks=len(batch_texts),
-            ):
-                batch_vectors = embeddings.embed_documents(batch_texts)
-            if len(batch_vectors) != len(batch_texts):
-                raise RuntimeError(
-                    f"Embedding batch {batch_number} returned {len(batch_vectors)} vectors "
-                    f"for {len(batch_texts)} chunks."
-                )
-            for vector in batch_vectors:
-                if len(vector) != dimension:
-                    raise ValueError(
-                        f"Embedding dimension mismatch in batch {batch_number}: "
-                        f"got {len(vector)}, expected {dimension}."
-                    )
+            )
             vectors.extend(batch_vectors)
             logger.info(
                 "Embedding batch completed | document_id=%s | batch=%s/%s | vectors=%s",

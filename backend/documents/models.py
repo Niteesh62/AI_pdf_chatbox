@@ -6,6 +6,13 @@ import os
 
 class PDFDocument(models.Model):
 
+    class EmbeddingStatus(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
     # PDF basic information
     title = models.CharField(max_length=255)
 
@@ -35,6 +42,12 @@ class PDFDocument(models.Model):
 
     # Extracted PDF content
     extracted_text = models.TextField(blank=True)
+
+    embedding_status = models.CharField(
+        max_length=16,
+        choices=EmbeddingStatus.choices,
+        default=EmbeddingStatus.PENDING,
+    )
 
     # Timestamps
     uploaded_at = models.DateTimeField(auto_now_add=True)

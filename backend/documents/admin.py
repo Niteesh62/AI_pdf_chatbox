@@ -9,9 +9,10 @@ class PDFDocumentAdmin(admin.ModelAdmin):
     list_display = (
         'id',
         'title',
+        'embedding_status',
         'uploaded_at'
     )
 
     search_fields = ('title',)
 
-    list_filter = ('uploaded_at',)
+    list_filter = ('embedding_status', 'uploaded_at')

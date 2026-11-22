@@ -112,6 +112,17 @@ options take precedence over values in `gunicorn.conf.py`; the startup logs
 include both the configured and effective bind plus effective worker and
 timeout settings.
 
+The CPU embedding model and Groq client are lazily cached once per Gunicorn
+worker in `documents/services/llm_embedding.py`. Keep `WEB_CONCURRENCY=1` on
+memory-limited instances: each additional worker has its own model cache.
+Embedding batches use four chunks, and model loading uses Accelerate's
+low-memory path with CPU float16 weights. New PDFs start with pending status;
+existing PDFs migrate as unknown, and processing/completed/failed status is
+visible in Django admin. A hard
+instance kill cannot run Python failure handlers, so a job interrupted by an
+OOM restart can remain marked processing. The 400 MB target must be checked
+against Render RSS after deployment; local measurements do not guarantee it.
+
 Gunicorn and Django diagnostics are written to standard output/error, which
 Render captures in the service logs. They include startup and worker lifecycle
 events, URL and database checks, HTTP method, path, resolved endpoint, status,

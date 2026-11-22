@@ -5,64 +5,26 @@ import json
 from django.conf import settings
 from django.db import connection
 
-from sentence_transformers import SentenceTransformer
-
-from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-logger = logging.getLogger(__name__)
+from .llm_embedding import encode_texts, get_chat_llm
 
-# Must be the SAME model used when creating PDF embeddings.
-EMBEDDING_MODEL_NAME = getattr(
-    settings,
-    "PDF_EMBEDDING_MODEL",
-    "sentence-transformers/all-MiniLM-L6-v2",
-)
+logger = logging.getLogger(__name__)
 
 TOP_K = 5
 
-_embedding_model = None
-
-
-def get_embedding_model():
-    """
-    Load the embedding model once and reuse it.
-    """
-
-    global _embedding_model
-
-    if _embedding_model is None:
-        logger.info(
-            "Loading embedding model: %s",
-            EMBEDDING_MODEL_NAME
-        )
-
-        _embedding_model = SentenceTransformer(
-            EMBEDDING_MODEL_NAME
-        )
-
-    return _embedding_model
-
-
-def embed_question(question):
+def embed_question(question, document_id=None):
     """
     Convert the question into a 384-dimensional vector.
     """
 
-    model = get_embedding_model()
-
-    embedding = model.encode(
-        question,
-        normalize_embeddings=True
-    )
-
-    if len(embedding) != 384:
-        raise ValueError(
-            f"Expected 384 dimensions, got {len(embedding)}."
-        )
-
-    return embedding.tolist()
+    return encode_texts(
+        [question],
+        batch_size=1,
+        stage="chat_embedding",
+        document_id=document_id,
+    )[0]
 
 
 def count_document_embeddings(document_id):
@@ -90,7 +52,7 @@ def retrieve_relevant_chunks(document_id, question, limit=TOP_K):
     Retrieve relevant PDF chunks using pgvector cosine distance.
     """
 
-    query_embedding = embed_question(question)
+    query_embedding = embed_question(question, document_id=document_id)
 
     # pgvector accepts a vector literal such as [0.1,0.2,...].
     embedding_literal = (
@@ -278,13 +240,7 @@ Answer based on the PDF context above.
 
     # 8. Initialize Groq.
     try:
-        llm = ChatGroq(
-            model="openai/gpt-oss-20b",
-            temperature=0,
-            api_key=groq_api_key,
-            max_retries=2,
-            timeout=60,
-        )
+        llm = get_chat_llm()
 
     except Exception as error:
         logger.exception("Failed to initialize Groq LLM")
