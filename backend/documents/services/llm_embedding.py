@@ -42,26 +42,15 @@ def get_embedding_model():
             "embedding_model_initialization",
             model=EMBEDDING_MODEL_NAME,
             device="cpu",
-            low_cpu_mem_usage=True,
-            torch_dtype="float16",
         ):
             os.environ.setdefault("OMP_NUM_THREADS", "1")
             os.environ.setdefault("MKL_NUM_THREADS", "1")
             os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-            import torch
-            from sentence_transformers import SentenceTransformer
+            from fastembed import TextEmbedding
 
-            torch.set_num_threads(1)
-            model = SentenceTransformer(
-                EMBEDDING_MODEL_NAME,
-                device="cpu",
-                model_kwargs={
-                    "low_cpu_mem_usage": True,
-                    "torch_dtype": torch.float16,
-                },
-            )
-            dimension = model.get_embedding_dimension()
+            model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
+            dimension = EXPECTED_VECTOR_SIZE
             if dimension != EXPECTED_VECTOR_SIZE:
                 raise ValueError(
                     f"Embedding model returned {dimension} dimensions; "
@@ -95,15 +84,11 @@ def encode_texts(texts, *, batch_size, stage, document_id=None):
         batch_size=effective_batch_size,
     ):
         with _inference_lock:
-            encoded = model.encode(
+            encoded = model.embed(
                 texts,
                 batch_size=effective_batch_size,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                convert_to_numpy=True,
             )
-
-        vectors = encoded.tolist()
+        vectors = [embedding.tolist() for embedding in encoded]
         if len(vectors) != len(texts):
             raise RuntimeError(
                 f"Embedding model returned {len(vectors)} vectors "

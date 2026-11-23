@@ -13,17 +13,12 @@ from documents.services.pdf_embedding_service import PDFIngestionError
 class SharedEmbeddingModelTests(SimpleTestCase):
     def test_model_is_loaded_once_and_used_for_normalized_vectors(self):
         model = Mock()
-        model.get_embedding_dimension.return_value = 384
-        model.encode.side_effect = lambda texts, **kwargs: numpy.zeros(
-            (len(texts), 384),
-            dtype="float32",
+        model.embed.side_effect = lambda texts, **kwargs: iter(
+            numpy.zeros((len(texts), 384), dtype="float32")
         )
         constructor = Mock(return_value=model)
-        sentence_transformers = types.ModuleType("sentence_transformers")
-        sentence_transformers.SentenceTransformer = constructor
-        torch = types.ModuleType("torch")
-        torch.float16 = object()
-        torch.set_num_threads = Mock()
+        fastembed = types.ModuleType("fastembed")
+        fastembed.TextEmbedding = constructor
 
         with (
             patch.multiple(
@@ -33,7 +28,7 @@ class SharedEmbeddingModelTests(SimpleTestCase):
             ),
             patch.dict(
                 sys.modules,
-                {"sentence_transformers": sentence_transformers, "torch": torch},
+                {"fastembed": fastembed},
             ),
         ):
             cached_model, dimension = llm_embedding.get_embedding_model()
@@ -50,21 +45,12 @@ class SharedEmbeddingModelTests(SimpleTestCase):
         self.assertEqual(len(vectors), 2)
         self.assertEqual(len(vectors[0]), 384)
         constructor.assert_called_once_with(
-            llm_embedding.EMBEDDING_MODEL_NAME,
-            device="cpu",
-            model_kwargs={
-                "low_cpu_mem_usage": True,
-                "torch_dtype": torch.float16,
-            },
+            model_name=llm_embedding.EMBEDDING_MODEL_NAME,
         )
-        model.encode.assert_called_once_with(
+        model.embed.assert_called_once_with(
             ["chunk one", "chunk two"],
             batch_size=2,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            convert_to_numpy=True,
         )
-        torch.set_num_threads.assert_called_once_with(1)
 
     def test_chat_llm_client_is_cached(self):
         client = Mock()
