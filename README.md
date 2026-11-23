@@ -1,125 +1,230 @@
 # AI PDF Chatbox
 
-AI PDF Chatbox is a full-stack application that lets a user upload a PDF, indexes the document text, and asks questions about that document using retrieval-augmented generation (RAG).
+AI PDF Chatbox is a full-stack PDF question-answering application.
 
-- **Frontend:** React 19, Vite, Axios, and Lucide React
-- **Backend:** Django REST Framework
-- **Data:** Supabase PostgreSQL for document metadata and pgvector embeddings
-- **AI:** Hugging Face `all-MiniLM-L6-v2` embeddings and a Groq chat model
+Users can upload a PDF, wait for the document to be processed, and ask
+questions based only on the uploaded document. The application uses
+retrieval-augmented generation (RAG):
 
-> The first PDF upload may take longer while the embedding model is downloaded and initialized.
+1. Extract text from the PDF.
+2. Split the text into overlapping chunks.
+3. Create a 384-dimensional embedding for each chunk with FastEmbed.
+4. Store the chunks and embeddings in a PostgreSQL `pgvector` table.
+5. Embed the user's question.
+6. Find the closest matching chunks for the selected PDF.
+7. Send those chunks and the question to Groq.
+8. Return a document-based answer in the React chat interface.
 
-## How It Works
+## Features
 
-1. The frontend sends a PDF and title to the Django API.
-2. Django stores the file and extracts its text with PyPDF.
-3. The text is split into overlapping chunks and stored with document metadata in Supabase PostgreSQL using pgvector.
-4. A question is matched against chunks belonging to the selected document.
-5. The relevant context is sent to Groq, which generates a document-based answer.
+- PDF upload through the React interface
+- File validation and Cloudinary storage
+- Background PDF ingestion
+- PDF text extraction with PyPDF
+- Text chunking with LangChain
+- FastEmbed/ONNX embeddings
+- PostgreSQL vector search with `pgvector`
+- Groq chat answers
+- Document download and extracted-text endpoints
+- Multiple local chat sessions per uploaded document
+- Django migration and database diagnostics
 
-## Repository Layout
+## Technology
+
+### Frontend
+
+- React 19
+- Vite 8
+- Axios
+- Lucide React
+- Vanilla CSS
+
+### Backend
+
+- Python 3.11
+- Django 5.2
+- Django REST Framework
+- PostgreSQL and `pgvector`
+- FastEmbed 0.9.1
+- ONNX Runtime
+- LangChain
+- PyPDF
+- Groq through LangChain Groq
+- Cloudinary raw-file storage
+- Gunicorn for production
+
+## Project Structure
 
 ```text
 AI_pdf_chatbox/
-├── backend/                 # Django REST API
-│   ├── config/              # Django project settings and URLs
-│   ├── documents/           # PDF models, APIs, and RAG services
-│   ├── manage.py
-│   └── README.md
-├── frontend/chatbox/        # React user interface
+├── frontend/
 │   ├── src/
-│   └── README.md
+│   │   ├── api/
+│   │   ├── Components/
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   └── package.json
+├── backend/
+│   ├── config/                  # Django settings, URLs, logging
+│   ├── documents/
+│   │   ├── migrations/
+│   │   ├── services/
+│   │   │   ├── llm_embedding.py
+│   │   │   ├── pdf_embedding_service.py
+│   │   │   ├── pdf_embedding_jobs.py
+│   │   │   └── pdf_chat_service.py
+│   │   ├── models.py
+│   │   ├── serializers.py
+│   │   ├── urls.py
+│   │   └── views.py
+│   ├── manage.py
+│   └── requirements.txt
 ├── .gitignore
 └── README.md
 ```
 
-Component-specific setup and commands are documented in:
+## How Processing Works
 
-- [Backend README](backend/README.md)
-- [Frontend README](frontend/chatbox/README.md)
+### PDF upload
+
+The frontend posts `title` and `pdf_file` to `POST /api/pdfs/`.
+Django saves the PDF record and stores the file in Cloudinary. Uploading
+returns HTTP 202 with the document ID and leaves the embedding status at
+`pending`.
+
+### PDF ingestion
+
+A background worker downloads the Cloudinary PDF to temporary storage,
+extracts its pages with PyPDF, cleans the text, and creates chunks of
+approximately 1,000 characters with 200 characters of overlap.
+
+FastEmbed loads `sentence-transformers/all-MiniLM-L6-v2` and creates
+384-dimensional normalized vectors. The vectors are stored in the
+`public.pdf_document_embeddings` PostgreSQL table and verified after insertion.
+
+Possible embedding statuses are:
+
+- `pending`
+- `processing`
+- `completed`
+- `failed`
+
+### Asking questions
+
+The frontend sends `document_id` and `question` to `POST /api/chat/`.
+The backend embeds the question, searches only embeddings belonging to that
+document, retrieves the most relevant chunks, and passes them to
+`openai/gpt-oss-20b` through Groq. The model is instructed to answer from the
+PDF context and to say when the answer is not present.
 
 ## Prerequisites
 
-- Windows PowerShell or a compatible terminal
-- Python 3.10+ (Python 3.11 is used by the checked-in virtual environment)
-- Node.js 20.19+ and npm
-- A PostgreSQL database (Supabase is supported)
-- A Groq API key
-- Internet access for initial model downloads
+- Python 3.11
+- Node.js 20.19 or newer
+- npm
+- PostgreSQL with the `pgvector` extension
+- Groq API key
+- Cloudinary account
+- Internet access for the first FastEmbed model download
 
-## Quick Start
+## Backend Setup
 
-Run the backend and frontend in separate terminals.
-
-### 1. Configure and start the backend
+Open a terminal in the repository root:
 
 ```powershell
 cd backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 Create `backend/.env`:
 
 ```env
-SECRET_KEY=generate_a_unique_secret_key
-DATABASE_URL=postgresql://your_user:your_password@your_host:5432/your_database
+SECRET_KEY=replace_with_a_secure_random_key
+DEBUG=True
+DATABASE_URL=postgresql://username:password@host:5432/database
 GROQ_API_KEY=your_groq_api_key
 CLOUDINARY_CLOUD_NAME=your_cloud_name
-CLOUDINARY_API_KEY=your_api_key
-CLOUDINARY_API_SECRET=your_api_secret
+CLOUDINARY_API_KEY=your_cloudinary_api_key
+CLOUDINARY_API_SECRET=your_cloudinary_api_secret
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+SECURE_SSL_REDIRECT=False
 ```
 
-PDF files are stored in Cloudinary. Set these values from your Cloudinary
-account; existing files in `backend/media/` are not migrated automatically.
-Generate a secure `SECRET_KEY` locally with
-`python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
-and set it in the backend environment (or Render's environment variables).
+Do not commit `.env`.
 
-Configure `DATABASE_URL` for your PostgreSQL database and enable the `vector`
-extension in Supabase. Then run the Django migrations:
+Generate a Django secret key:
+
+```powershell
+python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+```
+
+Enable `pgvector` in PostgreSQL. For Supabase, run this in the SQL editor:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS vector;
 ```
+
+Apply migrations:
 
 ```powershell
 python manage.py migrate
+python manage.py check
 python manage.py runserver
 ```
 
-The API starts at `http://127.0.0.1:8000/api/`.
+The backend will run at `http://127.0.0.1:8000`.
 
-### 2. Start the frontend
+## Frontend Setup
+
+Open another terminal:
 
 ```powershell
-cd frontend/chatbox
+cd frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173/`.
+Open `http://localhost:5173`.
 
-## API Reference
+The frontend API URL is configured in
+`frontend/src/api/axiosInstance.js`. For local development, use:
+
+```javascript
+baseURL: "http://localhost:8000/api/",
+```
+
+For a deployed backend, use:
+
+```javascript
+baseURL: "https://your-backend.example.com/api/",
+```
+
+You can alternatively change this file to read a Vite environment variable
+such as `VITE_API_BASE_URL` if you want one frontend build to support multiple
+deployment environments.
+
+## API Endpoints
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/health/` | Check whether the API server is responding |
-| `GET` | `/api/ready/` | Check whether the API and database are ready |
+| `GET` | `/api/health/` | Check whether Django is running |
+| `GET` | `/api/ready/` | Check database readiness |
 | `GET` | `/api/pdfs/` | List uploaded PDFs |
-| `POST` | `/api/pdfs/` | Upload a PDF and create embeddings |
-| `GET` | `/api/pdfs/{id}/` | Get one PDF record |
-| `DELETE` | `/api/pdfs/{id}/` | Delete a PDF and its embeddings |
-| `GET` | `/api/pdfs/{id}/download/` | Download the uploaded PDF |
-| `GET` | `/api/pdfs/{id}/text/` | Read extracted PDF text |
+| `POST` | `/api/pdfs/` | Upload a PDF and queue embedding |
+| `GET` | `/api/pdfs/{id}/` | Retrieve a PDF record |
+| `DELETE` | `/api/pdfs/{id}/` | Delete a PDF, its file, and embeddings |
+| `GET` | `/api/pdfs/{id}/download/` | Download the PDF |
+| `GET` | `/api/pdfs/{id}/text/` | Get extracted PDF text |
 | `POST` | `/api/chat/` | Ask a question about a PDF |
 
 Example chat request:
 
 ```json
 {
-  "document_id": 1,
+  "document_id": 17,
   "question": "What is this document about?"
 }
 ```
@@ -128,52 +233,148 @@ Example chat response:
 
 ```json
 {
-  "document_id": 1,
+  "document_id": 17,
   "question": "What is this document about?",
-  "answer": "The document discusses...",
+  "answer": "The document describes...",
   "status": "success"
 }
 ```
 
-## Using the Application
+## Frontend Behavior
 
-1. Open the frontend and choose a PDF.
-2. PDFs must be searchable text documents and cannot exceed 10 MB.
-3. Select **Upload and Start Chat**.
-4. Ask questions in the chat window.
-5. Use the sidebar to switch conversations or start a new chat.
+- Chat conversations are stored in React state for the current browser session.
+- Refreshing or closing the page clears conversation history.
+- A new chat starts a conversation for a newly uploaded PDF.
+- Switching chats restores the document and messages associated with that chat.
+- Clearing a chat resets only the messages for the active conversation.
+- The sidebar does not persist document history to local storage or a database.
 
-Conversation history is kept in browser component state for the current session. It is not persisted after a page refresh unless persistence is added.
+## Upload Requirements
+
+- File size must not exceed 10 MB.
+- The file must have a PDF extension or PDF content type.
+- Image-only or scanned PDFs require OCR.
+- OCR is not currently implemented.
+- PDFs with extractable text are required for embedding generation.
 
 ## Development Commands
 
-From the repository root:
+### Backend
 
 ```powershell
-# Backend
 cd backend
+python manage.py check
+python manage.py makemigrations
+python manage.py migrate
+python manage.py test
 python manage.py runserver
+```
 
-# Frontend
-cd frontend/chatbox
+### Frontend
+
+```powershell
+cd frontend
 npm run dev
 npm run build
 npm run lint
+npm run preview
 ```
 
-For Django operations, use:
+## Deployment
+
+### Django backend
+
+Use a PostgreSQL database that has `pgvector` enabled. Configure these
+environment variables:
+
+- `SECRET_KEY`
+- `DATABASE_URL`
+- `GROQ_API_KEY`
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+- `CORS_ALLOWED_ORIGINS`
+- `DEBUG=False`
+
+Run migrations during deployment:
 
 ```powershell
-cd backend
-python manage.py makemigrations
 python manage.py migrate
-python manage.py check
 ```
 
-## Configuration and Security
+Use a production server such as Gunicorn:
 
-- Never commit API keys, database passwords, Django secrets, uploaded PDFs, or vector database files.
-- `.env`, virtual environments, `media/`, `vectorstore/`, database files, and `node_modules/` are excluded through `.gitignore`.
-- Replace hard-coded development credentials and the Django `SECRET_KEY` before deployment.
-- Set appropriate `ALLOWED_HOSTS`, CORS origins, database environment variables, HTTPS settings, and file-storage limits for production.
-- Scanned PDFs may require OCR because text extraction does not currently run OCR.
+```text
+gunicorn config.wsgi:application --config gunicorn.conf.py
+```
+
+Set `WEB_CONCURRENCY=1` if the hosting plan has limited memory. FastEmbed
+loads a model into each Gunicorn worker process.
+
+### React frontend
+
+Build the frontend:
+
+```powershell
+cd frontend
+npm run build
+```
+
+Deploy the generated `frontend/dist/` directory to Vercel, Netlify, or another
+static host. Set the Axios API URL to the HTTPS backend URL and configure
+`CORS_ALLOWED_ORIGINS` on Django with the exact deployed frontend origin.
+
+## Security and Maintenance
+
+- Never commit `.env`, database credentials, API keys, Cloudinary secrets, or
+  private PDF data.
+- Use HTTPS for deployed frontend and backend origins.
+- Keep Django's production `DEBUG=False`.
+- Apply migrations before starting a new application release.
+- Use one Gunicorn worker on memory-limited hosts because model loading is
+  process-local.
+- Monitor `/api/ready/` and hosting-provider memory metrics.
+- `/api/health/` is for server liveness; `/api/ready/` checks database readiness.
+
+## Troubleshooting
+
+### Upload returns 500
+
+Check the Django terminal. The most common causes are missing migrations,
+missing Cloudinary credentials, database connection failure, or a PDF that
+contains no extractable text.
+
+Apply migrations after model changes:
+
+```powershell
+python manage.py migrate
+```
+
+### Migration reports a missing column
+
+Run `python manage.py showmigrations documents` and
+`python manage.py migrate`.
+
+### No embeddings are created
+
+- Confirm the PDF has searchable text.
+- Confirm the `public.pdf_document_embeddings` table exists.
+- Confirm `pgvector` is installed and enabled.
+- Check the Django logs for extraction or model-loading errors.
+
+### Chat says no embeddings were found
+
+Wait for the background embedding job to finish, or upload the PDF again.
+Image-only PDFs also cannot generate embeddings without OCR.
+
+### Frontend cannot connect to the backend
+
+- Confirm Django is running on port 8000.
+- Confirm the Axios base URL is correct.
+- Confirm CORS allows `http://localhost:5173`.
+- For HTTPS frontend deployments, use an HTTPS backend URL.
+
+## Component Documentation
+
+- [Backend documentation](backend/README.md)
+- [Frontend documentation](frontend/README.md)

@@ -1,20 +1,54 @@
 # AI PDF Chatbox — Frontend
 
-The frontend is a React 19 single-page application built with Vite. It provides PDF selection and upload, conversation history, chat messages, and clear/new-chat controls.
+The frontend is a React single-page application for uploading PDFs and
+chatting with uploaded documents.
 
 ## Technology
 
 - React 19
-- Vite
+- Vite 8
 - Axios
-- Lucide React icons
+- Lucide React
 - Vanilla CSS
+- Oxlint
+
+## Setup
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+The backend should be running at `http://127.0.0.1:8000`.
+
+## API Configuration
+
+The Axios instance is defined in `src/api/axiosInstance.js`.
+
+For local development:
+
+```javascript
+baseURL: "http://localhost:8000/api/",
+```
+
+For a deployed backend:
+
+```javascript
+baseURL: "https://your-backend.example.com/api/",
+```
+
+The backend must allow the frontend origin through
+`CORS_ALLOWED_ORIGINS`.
+
+An HTTPS frontend must use an HTTPS backend URL.
 
 ## Directory Guide
 
 ```text
-frontend/chatbox/
-├── public/
+frontend/
 ├── src/
 │   ├── api/
 │   │   └── axiosInstance.js
@@ -27,39 +61,9 @@ frontend/chatbox/
 │   ├── App.css
 │   └── main.jsx
 ├── package.json
+├── vite.config.js
 └── README.md
 ```
-
-## Prerequisites
-
-- Node.js 20.19 or newer
-- npm
-- The Django backend running at `http://127.0.0.1:8000`
-
-## Setup
-
-From the repository root:
-
-```powershell
-cd frontend/chatbox
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173/`.
-
-The API base URL defaults to the local backend. Set `API_BASE_URL` in the
-frontend environment (including Vercel project settings) to override it:
-
-```env
-API_BASE_URL=https://your-backend.example.com/api/
-```
-
-Vite explicitly exposes only this variable to the browser. The standard
-`VITE_API_BASE_URL` variable is also supported as a fallback. Redeploy after
-changing Vercel environment variables so the new URL is included in the build.
-The backend must allow the frontend's exact origin in `CORS_ALLOWED_ORIGINS`;
-an HTTPS frontend must use an HTTPS API.
 
 ## Available Scripts
 
@@ -67,44 +71,77 @@ an HTTPS frontend must use an HTTPS API.
 |---|---|
 | `npm run dev` | Start the Vite development server |
 | `npm run build` | Create a production build in `dist/` |
-| `npm run preview` | Preview the production build locally |
-| `npm run lint` | Run Oxlint across the project |
+| `npm run preview` | Preview the production build |
+| `npm run lint` | Run Oxlint |
 
 ## Application Flow
 
-1. `App.jsx` creates a new conversation after a successful upload.
-2. `Pdf_uploader.jsx` validates the file and posts it to `/api/pdfs/`.
-3. `ChatWindow.jsx` posts questions and the selected document ID to `/api/chat/`.
-4. `Sidebar.jsx` lists and switches local chat sessions.
-5. The application state is reset on a full page refresh.
+1. `Pdf_uplaoder.jsx` collects the PDF and title.
+2. The PDF is sent to `POST /api/pdfs/`.
+3. The backend returns the uploaded document record.
+4. `App.jsx` creates a React chat session for that document.
+5. `ChatWindow.jsx` sends questions to `POST /api/chat/`.
+6. The answer is stored in the active chat's React state.
+7. `Sidebar.jsx` switches or creates chat sessions.
 
-## Upload Restrictions
+## Upload Validation
 
-- `.pdf` extension or PDF MIME type
-- Maximum file size of 10 MB
-- The backend also validates PDF uploads
+The frontend:
 
-A scanned or image-only PDF may upload successfully but cannot be queried until text extraction through OCR is available.
+- Requires a selected file.
+- Accepts PDF files.
+- Sends the file as multipart form data.
+- Displays backend validation and network errors.
 
-## Development Notes
+The backend additionally validates the file extension and 10 MB size limit.
 
-- Keep API requests behind `src/api/axiosInstance.js` so base URL and headers remain consistent.
-- Preserve the `document_id` returned by the upload endpoint when changing chat state.
-- Handle loading, backend validation, network, and empty-answer states in the relevant components.
-- Run lint and a production build before submitting a change:
+## Chat State
+
+Chat sessions and messages are stored in React state only.
+
+There is no local-storage or backend conversation-persistence implementation.
+Refreshing the browser clears all chat history. Uploading another PDF creates
+a new in-memory chat session.
+
+## Development Checks
 
 ```powershell
 npm run lint
 npm run build
 ```
 
-## Production Configuration
+Fix lint or build errors before deploying.
+
+## Production Deployment
+
+```powershell
+npm run build
+```
+
+Deploy the generated `dist/` directory to a static host.
 
 Before deployment:
 
-1. Build the app with `npm run build`.
-2. Set the Axios base URL to the deployed API URL.
-3. Configure the backend CORS origin to match the deployed frontend domain.
-4. Serve the generated `dist/` directory with HTTPS through a static web host or reverse proxy.
+1. Set the Axios base URL to the deployed HTTPS backend.
+2. Set Django `CORS_ALLOWED_ORIGINS` to the exact frontend origin.
+3. Build after changing the API URL.
+4. Never place Groq or Django secrets in frontend code or browser environment variables.
 
-Do not store Groq keys or Django credentials in frontend environment variables or browser code.
+## Troubleshooting
+
+### Network error
+
+- Confirm Django is running.
+- Confirm the Axios base URL is correct.
+- Confirm the frontend origin is allowed by CORS.
+
+### 500 upload response
+
+Open the Django terminal. Common causes include missing migrations,
+Cloudinary credentials, database connectivity, or a PDF with no extractable
+text.
+
+### Chat returns no answer
+
+The PDF embedding job may still be running. Wait for processing to complete
+and verify `/api/pdfs/{id}/` returns a completed embedding status.
